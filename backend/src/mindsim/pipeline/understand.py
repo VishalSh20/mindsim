@@ -58,14 +58,17 @@ def understand(
                 )
                 data[field] = value
 
-    # Parse competitors
+    # Parse competitors (handle both dict entries and bare strings from validation)
     competitors = []
     for c in data.get("competitors", []):
-        competitors.append(CompetitorInfo(
-            name=c.get("name", "Unknown"),
-            price=c.get("price"),
-            price_model=c.get("price_model"),
-        ))
+        if isinstance(c, dict):
+            competitors.append(CompetitorInfo(
+                name=c.get("name", "Unknown"),
+                price=c.get("price"),
+                price_model=c.get("price_model"),
+            ))
+        elif isinstance(c, str):
+            competitors.append(CompetitorInfo(name=c))
 
     # Parse research plan
     priority_queries = []
