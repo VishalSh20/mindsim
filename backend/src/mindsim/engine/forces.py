@@ -200,15 +200,25 @@ def compute_forces(
 
     # ═══════════════════════════════════════════════════════════════
     # FORCE 6: HYPERBOLIC DISCOUNTING (Laibson 1997, Augenblick 2015)
-    # -(time_to_value × (1 - β) × perceived_benefit × 0.3)
+    # -(time_to_value × (1 - β_agent) × perceived_benefit × 0.3)
     # β ∈ {0.5 for behavior-change, 0.85 for consumption}
+    #
+    # Per-agent variation per Frederick et al. 2002: discount rates
+    # vary enormously across individuals. We modulate the product-level
+    # β by agent openness: high-openness agents (novelty seekers) have
+    # weaker present bias (β closer to 1.0), low-openness agents have
+    # stronger present bias (β closer to 0.0). This produces ±15%
+    # variation around the calibrated β.
     # ═══════════════════════════════════════════════════════════════
+    # Per-agent beta: openness shifts beta toward 1.0 (less bias)
+    # openness=0.5 → no shift; openness=1.0 → beta + 0.15; openness=0 → beta - 0.15
+    agent_beta = present_bias_beta + 0.3 * (open_a - 0.5)
+    agent_beta = np.clip(agent_beta, 0.1, 0.95)
+
     discount = -(
-        time_to_value * (1.0 - present_bias_beta) * perceived_benefit * DISCOUNT_SCALE
+        time_to_value * (1.0 - agent_beta) * perceived_benefit * DISCOUNT_SCALE
     )
-    forces["hyperbolic_discounting"][aware_mask] = np.full(
-        aware_mask.sum(), discount, dtype=np.float64
-    )
+    forces["hyperbolic_discounting"][aware_mask] = discount
 
     # ═══════════════════════════════════════════════════════════════
     # FORCE 7: IDENTITY SIGNALING (Veblen 1899, Berger & Heath 2007)

@@ -89,9 +89,10 @@ def research(
         trends = get_category_trends(keywords)
         context.category_growth = trends.get("growth_rate")
         context.category_maturity = trends.get("maturity")
+        growth_str = f"{context.category_growth:.2f}" if context.category_growth is not None else "N/A"
         logger.info(
             f"Trends: {context.category_maturity} "
-            f"(growth: {context.category_growth:.2f})"
+            f"(growth: {growth_str})"
         )
 
     # Phase 3: Optional queries (conditional)
@@ -134,8 +135,9 @@ def _evaluate_confidence(result: dict, goal: str) -> float:
 
     # Factor 2: Source authority (0.3)
     authority_domains = [
-        "pricing", "official", ".com", "blog", "techcrunch",
-        "crunchbase", "producthunt", "g2.com",
+        "/pricing", "official", "techcrunch.com", "crunchbase.com",
+        "producthunt.com", "g2.com", "gartner.com", "statista.com",
+        "bloomberg.com", "reuters.com",
     ]
     authority_score = 0.0
     for r in results:

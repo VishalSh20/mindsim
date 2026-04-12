@@ -97,6 +97,25 @@ def run_sensitivity_analysis(
             confidence=cparam.confidence,
         ))
 
+    # Reference price (ReferencePriceParam, not CalibratedParam — handle separately)
+    ref = params.reference_price
+    if ref.value > 0 and ref.confidence < confidence_threshold:
+        low_adoption = _rerun_with_ref_price_override(
+            agents, params, ref.value * (1.0 - swing_fraction), rng
+        )
+        high_adoption = _rerun_with_ref_price_override(
+            agents, params, ref.value * (1.0 + swing_fraction), rng
+        )
+        swing_pp = abs(high_adoption - low_adoption) * 100.0
+        results.append(SensitivityResult(
+            parameter="reference_price",
+            base_adoption=base_adoption,
+            low_adoption=low_adoption,
+            high_adoption=high_adoption,
+            swing=swing_pp,
+            confidence=ref.confidence,
+        ))
+
     # Sort by swing magnitude (biggest uncertainty first)
     results.sort(key=lambda r: r.swing, reverse=True)
     return results
@@ -118,6 +137,26 @@ def _rerun_with_override(
     modified = params.model_copy(deep=True)
     cparam = getattr(modified, param_name)
     cparam.value = new_value
+
+    forces = compute_forces(agents, modified)
+    adopt_prob, decisions = compute_decisions(forces, rng=rng)
+
+    aware_mask = agents["aware"]
+    if aware_mask.sum() == 0:
+        return 0.0
+
+    return float(decisions[aware_mask].sum() / aware_mask.sum())
+
+
+def _rerun_with_ref_price_override(
+    agents: np.ndarray,
+    params: SimulationParams,
+    new_ref_price: float,
+    rng: np.random.Generator,
+) -> float:
+    """Rerun simulation with reference_price overridden."""
+    modified = params.model_copy(deep=True)
+    modified.reference_price.value = new_ref_price
 
     forces = compute_forces(agents, modified)
     adopt_prob, decisions = compute_decisions(forces, rng=rng)

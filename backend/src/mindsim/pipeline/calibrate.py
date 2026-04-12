@@ -74,7 +74,12 @@ def _build_calibration_context(
     ]
 
     if profile.price is not None:
-        parts.append(f"Price: ${profile.price}/mo")
+        period_label = {
+            "annual": "/yr",
+            "one-time": " one-time",
+            "monthly": "/mo",
+        }.get(profile.billing_period, "/mo")
+        parts.append(f"Price: ${profile.price}{period_label}")
     if profile.price_model:
         parts.append(f"Price model: {profile.price_model}")
     if profile.value_proposition:
@@ -102,7 +107,7 @@ def _build_calibration_context(
 
     # Market data
     if market.category_penetration is not None:
-        parts.append(f"\nCategory penetration: {market.category_penetration}")
+        parts.append(f"\nCategory penetration: {market.category_penetration*100:.1f}%")
     if market.category_growth is not None:
         parts.append(f"Category growth: {market.category_growth}")
     if market.category_maturity:

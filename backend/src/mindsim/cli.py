@@ -31,6 +31,7 @@ def main():
     args = parse_args()
     setup_logging(verbose=args.verbose)
 
+    from mindsim.diagnostics import DiagnosticDump
     from mindsim.llm.client import LLMClient
     from mindsim.models.config import SimulationConfig
     from mindsim.models.market import MarketContext
@@ -43,6 +44,7 @@ def main():
     from mindsim.pipeline.understand import understand
 
     product_text = args.product_description
+    dump = DiagnosticDump(path=args.dump_path) if args.dump else None
 
     console.print()
     console.print(
@@ -67,6 +69,8 @@ def main():
         # Stage 1: Understand
         task = progress.add_task("[cyan]Understanding product...", total=None)
         profile = understand(product_text, llm)
+        if dump:
+            dump.record_understand(profile)
         progress.update(task, completed=True, description="[green]✓ Product understood")
 
         # Stage 2: Research
@@ -76,6 +80,8 @@ def main():
             skip=args.skip_research,
             budget=args.budget,
         )
+        if dump:
+            dump.record_research(market)
         progress.update(task, completed=True, description="[green]✓ Research complete")
 
         # Stage 3: Calibrate
@@ -86,11 +92,15 @@ def main():
         if args.override:
             config = _apply_overrides(config, args.override)
 
+        if dump:
+            dump.record_calibration(config)
         progress.update(task, completed=True, description="[green]✓ Parameters calibrated")
 
         # Stage 4: Simulate
         task = progress.add_task("[cyan]Running simulation (1,000 agents)...", total=None)
         sim_result = simulate(config, rng=rng)
+        if dump:
+            dump.record_simulation(sim_result, config)
         progress.update(task, completed=True, description="[green]✓ Simulation complete")
 
         # Stage 4e: Events
@@ -104,11 +114,15 @@ def main():
                     event_text, sim_result, config, llm, rng
                 )
                 event_results.append(event_result)
+                if dump:
+                    dump.record_event(event_text, event_result)
                 progress.update(task, completed=True, description=f"[green]✓ Event processed")
 
         # Stage 5: Analyze
         task = progress.add_task("[cyan]Analyzing results...", total=None)
         report = analyze(sim_result, config, llm, rng)
+        if dump:
+            dump.record_analysis(report)
         progress.update(task, completed=True, description="[green]✓ Analysis complete")
 
     elapsed = time.time() - start_time
@@ -116,6 +130,11 @@ def main():
     # Display results
     console.print()
     _display_results(sim_result, report, config, elapsed)
+
+    # Write diagnostic dump
+    if dump:
+        dump.write()
+        console.print(f"[dim]Diagnostic dump written to {args.dump_path}[/]")
 
     # Interactive mode
     if args.interactive:
@@ -167,6 +186,16 @@ def parse_args() -> argparse.Namespace:
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
+    )
+    parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="Write diagnostic dump (research, params, per-agent data) to mindsim_dump.json",
+    )
+    parser.add_argument(
+        "--dump-path",
+        default="mindsim_dump.json",
+        help="Path for diagnostic dump file (default: mindsim_dump.json)",
     )
     return parser.parse_args()
 
