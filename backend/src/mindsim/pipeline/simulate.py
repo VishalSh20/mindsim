@@ -56,6 +56,7 @@ def simulate(
         n=n_agents,
         population_config=config.population_config,
         archetype_set=archetype_set,
+        sim_params=params,
         rng=rng,
     )
 

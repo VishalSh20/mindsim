@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from mindsim.engine.forces import compute_decisions, compute_forces
+from mindsim.engine.population import restamp_agent_param
 from mindsim.models.config import CalibratedParam, SimulationConfig, SimulationParams
 from mindsim.models.results import SensitivityResult
 
@@ -130,15 +131,19 @@ def _rerun_with_override(
 ) -> float:
     """Rerun simulation with a single param overridden.
 
-    Creates a modified copy of params and runs forces + decisions.
+    Creates a modified copy of params, re-stamps the corresponding
+    per-agent field, and runs forces + decisions.
     Returns total adoption rate (adopted / all agents).
     """
-    # Deep copy params and override one field
     modified = params.model_copy(deep=True)
     cparam = getattr(modified, param_name)
     cparam.value = new_value
 
-    forces = compute_forces(agents, modified)
+    # Re-stamp per-agent field if agents have archetype-specific params
+    agents_copy = agents.copy()
+    restamp_agent_param(agents_copy, param_name, cparam, rng)
+
+    forces = compute_forces(agents_copy, modified)
     adopt_prob, decisions = compute_decisions(forces, rng=rng)
 
     n_total = len(agents)
@@ -161,7 +166,11 @@ def _rerun_with_ref_price_override(
     modified = params.model_copy(deep=True)
     modified.reference_price.value = new_ref_price
 
-    forces = compute_forces(agents, modified)
+    # Re-stamp per-agent reference price
+    agents_copy = agents.copy()
+    restamp_agent_param(agents_copy, "reference_price", modified.reference_price, rng)
+
+    forces = compute_forces(agents_copy, modified)
     adopt_prob, decisions = compute_decisions(forces, rng=rng)
 
     n_total = len(agents)

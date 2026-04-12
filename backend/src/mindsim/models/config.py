@@ -2,9 +2,31 @@
 
 This is the ONLY place numerical simulation parameters live.
 Each parameter has a value, basis (why this number), and confidence (how sure).
+Optionally, parameters can have per-archetype overrides (by_archetype).
 """
 
+from __future__ import annotations
+
 from pydantic import BaseModel, Field
+
+
+# The 5 Rogers adoption archetypes
+ARCHETYPE_NAMES = ["innovator", "early_adopter", "early_majority", "late_majority", "laggard"]
+
+
+def resolve_archetype_value(
+    base_value: float,
+    by_archetype: dict[str, float] | None,
+    archetype_name: str,
+) -> float:
+    """Resolve a parameter value for a specific archetype.
+
+    Returns the archetype-specific override if present, otherwise the base value.
+    Handles None by_archetype, missing keys, and partial overrides.
+    """
+    if by_archetype is None:
+        return base_value
+    return by_archetype.get(archetype_name, base_value)
 
 
 class CalibratedParam(BaseModel):
@@ -13,6 +35,7 @@ class CalibratedParam(BaseModel):
     value: float
     basis: str = ""  # why this number
     confidence: float = 0.5  # 0-1, how confident we are
+    by_archetype: dict[str, float] | None = None  # optional per-archetype overrides
 
 
 class ReferencePriceComponent(BaseModel):
@@ -30,6 +53,7 @@ class ReferencePriceParam(BaseModel):
     components: list[ReferencePriceComponent] = Field(default_factory=list)
     confidence: float = 0.5
     basis: str = ""
+    by_archetype: dict[str, float] | None = None  # optional per-archetype overrides
 
 
 class AwarenessByArchetype(BaseModel):

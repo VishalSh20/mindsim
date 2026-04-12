@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from mindsim.engine.forces import compute_decisions, compute_forces
+from mindsim.engine.population import restamp_agent_param
 from mindsim.models.config import SimulationConfig, SimulationParams
 from mindsim.models.results import InterventionResult
 
@@ -117,7 +118,16 @@ def rank_interventions(
             else:
                 cparam.value = factor
 
-        forces = compute_forces(agents, modified_params)
+        # Re-stamp per-agent fields for any modified params
+        agents_copy = agents.copy()
+        for param_name in intervention.modifications:
+            if param_name in ("price_zero", "price_factor"):
+                continue
+            cparam = getattr(modified_params, param_name, None)
+            if cparam is not None and hasattr(cparam, "value"):
+                restamp_agent_param(agents_copy, param_name, cparam, rng)
+
+        forces = compute_forces(agents_copy, modified_params)
         _, decisions = compute_decisions(forces, rng=rng)
 
         n_total = len(agents)

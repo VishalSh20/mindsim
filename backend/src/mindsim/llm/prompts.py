@@ -123,6 +123,20 @@ EVERY parameter must have:
 - basis: WHY this number (cite evidence, comparison, or reasoning)
 - confidence: HOW SURE you are (0-1)
 
+OPTIONAL per-archetype overrides (by_archetype):
+Some parameters are perceived differently by different adopter segments (Rogers 1962). \
+When a parameter clearly varies by archetype, add a "by_archetype" dict with keys from: \
+"innovator", "early_adopter", "early_majority", "late_majority", "laggard".
+
+You don't need all 5 — missing archetypes use the base "value". Only include by_archetype \
+when there's a clear product-specific reason:
+- perceived_benefit: innovators may value novel/technical products more; laggards may not understand the value
+- switching_cost: innovators actively seek new tools (low); laggards have deep habits (high)
+- benefit_certainty: early adopters tolerate uncertainty; late majority needs proof
+- reference_price: different segments anchor to different competitors (power users anchor to premium tools, casual users anchor to free)
+- social_visibility: may vary if the product is used differently by segment
+- time_to_value: experienced users may see value faster
+
 Reference price should be computed from competitor prices. Include components:
 - Each major competitor/alternative with its weight in forming the reference
 
@@ -136,14 +150,15 @@ Return ONLY this JSON structure:
       {"source": "name", "price": number, "weight": number}
     ],
     "confidence": number,
-    "basis": "explanation"
+    "basis": "explanation",
+    "by_archetype": {"innovator": number, "laggard": number}
   },
   "category_penetration": {"value": number, "basis": "string", "confidence": number},
-  "benefit_certainty": {"value": number, "basis": "string", "confidence": number},
-  "perceived_benefit": {"value": number, "basis": "string", "confidence": number},
+  "benefit_certainty": {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
+  "perceived_benefit": {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
   "time_to_value": {"value": number, "basis": "string", "confidence": number},
   "requires_behavior_change": {"value": number, "basis": "string", "confidence": number},
-  "switching_cost": {"value": number, "basis": "string", "confidence": number},
+  "switching_cost": {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
   "social_visibility": {"value": number, "basis": "string", "confidence": number},
   "identity_signal": {"value": number, "basis": "string", "confidence": number},
   "present_bias_beta": {"value": number, "basis": "string", "confidence": number},

@@ -124,11 +124,14 @@ class DiagnosticDump:
         params = config.simulation_params
 
         def _cparam_dict(cp) -> dict:
-            return {
+            d = {
                 "value": cp.value,
                 "basis": cp.basis,
                 "confidence": cp.confidence,
             }
+            if cp.by_archetype:
+                d["by_archetype"] = cp.by_archetype
+            return d
 
         self.data["stages"]["3_calibrate"] = {
             "price": params.price,
@@ -140,6 +143,7 @@ class DiagnosticDump:
                     {"source": c.source, "price": c.price, "weight": c.weight}
                     for c in params.reference_price.components
                 ],
+                **({"by_archetype": params.reference_price.by_archetype} if params.reference_price.by_archetype else {}),
             },
             "parameters": {
                 "category_penetration": _cparam_dict(params.category_penetration),
@@ -212,6 +216,12 @@ class DiagnosticDump:
                     "novelty_weight": round(float(agents[i]["novelty_weight"]), 4),
                     "price_sensitivity": round(float(agents[i]["price_sensitivity"]), 4),
                     "competitor_awareness_frac": round(float(agents[i]["competitor_awareness_frac"]), 4),
+                    "agent_perceived_benefit": round(float(agents[i]["agent_perceived_benefit"]), 4),
+                    "agent_benefit_certainty": round(float(agents[i]["agent_benefit_certainty"]), 4),
+                    "agent_switching_cost": round(float(agents[i]["agent_switching_cost"]), 4),
+                    "agent_reference_price": round(float(agents[i]["agent_reference_price"]), 2),
+                    "agent_social_visibility": round(float(agents[i]["agent_social_visibility"]), 4),
+                    "agent_time_to_value": round(float(agents[i]["agent_time_to_value"]), 4),
                 }
 
                 # Per-agent forces

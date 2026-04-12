@@ -128,6 +128,18 @@ def _parse_calibration_response(
 ) -> SimulationConfig:
     """Parse LLM calibration response into SimulationConfig."""
 
+    VALID_ARCHETYPES = {"innovator", "early_adopter", "early_majority", "late_majority", "laggard"}
+
+    def _parse_by_archetype(d: dict) -> dict[str, float] | None:
+        raw = d.get("by_archetype")
+        if raw is None or not isinstance(raw, dict):
+            return None
+        filtered = {
+            k: float(v) for k, v in raw.items()
+            if k in VALID_ARCHETYPES and isinstance(v, (int, float))
+        }
+        return filtered if filtered else None
+
     def _parse_cparam(d: dict | float | None, default: float = 0.5) -> CalibratedParam:
         if d is None:
             return CalibratedParam(value=default)
@@ -137,6 +149,7 @@ def _parse_calibration_response(
             value=float(d.get("value", default)),
             basis=d.get("basis", ""),
             confidence=float(d.get("confidence", 0.5)),
+            by_archetype=_parse_by_archetype(d),
         )
 
     # Reference price
@@ -157,6 +170,7 @@ def _parse_calibration_response(
             components=components,
             confidence=float(ref_data.get("confidence", 0.5)),
             basis=ref_data.get("basis", ""),
+            by_archetype=_parse_by_archetype(ref_data) if isinstance(ref_data, dict) else None,
         )
 
     # Awareness

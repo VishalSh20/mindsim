@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from mindsim.engine.archetypes import ArchetypeSet, load_archetypes
-from mindsim.models.config import PopulationConfig
+from mindsim.models.config import ARCHETYPE_NAMES, PopulationConfig, SimulationParams, resolve_archetype_value
 
 
 # Structured dtype for agent arrays
@@ -32,6 +32,13 @@ AGENT_DTYPE = np.dtype([
     ("income", np.float32),
     ("aware", np.bool_),
     ("competitor_awareness_frac", np.float32),
+    # Per-agent product perception fields (stamped from archetype-specific calibration)
+    ("agent_perceived_benefit", np.float32),
+    ("agent_benefit_certainty", np.float32),
+    ("agent_switching_cost", np.float32),
+    ("agent_reference_price", np.float32),
+    ("agent_social_visibility", np.float32),
+    ("agent_time_to_value", np.float32),
 ])
 
 
@@ -39,6 +46,7 @@ def generate_population(
     n: int = 1000,
     population_config: PopulationConfig | None = None,
     archetype_set: ArchetypeSet | None = None,
+    sim_params: SimulationParams | None = None,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Generate a population of agents.
@@ -163,11 +171,103 @@ def generate_population(
     ).astype(np.float32)
     agents["income"] = income
 
+    # --- Stamp per-archetype product perception params ---
+    if sim_params is not None:
+        _stamp_product_params(agents, archetype_ids, archetype_names, sim_params, rng)
+
     # --- Awareness is set later by the simulation stage ---
     agents["aware"] = True  # default, overridden in simulate
     agents["competitor_awareness_frac"] = 0.5  # default
 
     return agents
+
+
+# Map from SimulationParams field name to AGENT_DTYPE field name
+PARAM_TO_AGENT_FIELD = {
+    "perceived_benefit": "agent_perceived_benefit",
+    "benefit_certainty": "agent_benefit_certainty",
+    "switching_cost": "agent_switching_cost",
+    "social_visibility": "agent_social_visibility",
+    "time_to_value": "agent_time_to_value",
+}
+
+# reference_price is handled separately (ReferencePriceParam, not 0-1 scale)
+REF_PRICE_AGENT_FIELD = "agent_reference_price"
+
+
+def _stamp_product_params(
+    agents: np.ndarray,
+    archetype_ids: np.ndarray,
+    archetype_names: list[str],
+    sim_params: SimulationParams,
+    rng: np.random.Generator,
+) -> None:
+    """Stamp per-archetype product perception values onto agents.
+
+    For each of the 6 product params, resolves the archetype-specific value
+    (or falls back to base), adds ±3.5% noise, and writes to agent array.
+    """
+    for param_name, agent_field in PARAM_TO_AGENT_FIELD.items():
+        cparam = getattr(sim_params, param_name)
+        for i, aname in enumerate(archetype_names):
+            mask = archetype_ids == i
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            base = resolve_archetype_value(cparam.value, cparam.by_archetype, aname)
+            sigma = max(base * 0.035, 0.005)  # ±3.5% noise, min sigma for near-zero
+            noisy = rng.normal(base, sigma, size=count)
+            noisy = np.clip(noisy, 0.0, 1.0)
+            agents[agent_field][mask] = noisy.astype(np.float32)
+
+    # Reference price (dollar-denominated, not 0-1)
+    ref = sim_params.reference_price
+    for i, aname in enumerate(archetype_names):
+        mask = archetype_ids == i
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        base = resolve_archetype_value(ref.value, ref.by_archetype, aname)
+        sigma = max(base * 0.05, 0.01)  # ±5% noise for prices
+        noisy = rng.normal(base, sigma, size=count)
+        noisy = np.maximum(noisy, 0.0)
+        agents[REF_PRICE_AGENT_FIELD][mask] = noisy.astype(np.float32)
+
+
+def restamp_agent_param(
+    agents: np.ndarray,
+    param_name: str,
+    cparam,
+    rng: np.random.Generator,
+) -> None:
+    """Re-stamp one per-agent product param field after a param override.
+
+    Used by sensitivity analysis and interventions to update agent arrays
+    when a CalibratedParam is modified for a rerun.
+    """
+    if param_name in PARAM_TO_AGENT_FIELD:
+        agent_field = PARAM_TO_AGENT_FIELD[param_name]
+        for i, aname in enumerate(ARCHETYPE_NAMES):
+            mask = agents["archetype_id"] == i
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            base = resolve_archetype_value(cparam.value, cparam.by_archetype, aname)
+            sigma = max(base * 0.035, 0.005)
+            noisy = rng.normal(base, sigma, size=count)
+            noisy = np.clip(noisy, 0.0, 1.0)
+            agents[agent_field][mask] = noisy.astype(np.float32)
+    elif param_name == "reference_price":
+        for i, aname in enumerate(ARCHETYPE_NAMES):
+            mask = agents["archetype_id"] == i
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            base = resolve_archetype_value(cparam.value, cparam.by_archetype, aname)
+            sigma = max(base * 0.05, 0.01)
+            noisy = rng.normal(base, sigma, size=count)
+            noisy = np.maximum(noisy, 0.0)
+            agents[REF_PRICE_AGENT_FIELD][mask] = noisy.astype(np.float32)
 
 
 def apply_awareness(

@@ -57,21 +57,36 @@ def compute_forces(
     novelty_w = agents["novelty_weight"].astype(np.float64)
     price_sens = agents["price_sensitivity"].astype(np.float64)
 
-    # Pre-extract sim params
+    # Pre-extract sim params (scalar fallbacks)
     price = params.price
-    ref_price_value = params.reference_price.value
-    perceived_benefit = params.perceived_benefit.value
-    benefit_certainty = params.benefit_certainty.value
-    category_penetration = params.category_penetration.value
-    switching_cost = params.switching_cost.value
-    social_visibility = params.social_visibility.value
     identity_signal = params.identity_signal.value
-    time_to_value = params.time_to_value.value
     present_bias_beta = params.present_bias_beta.value
     fomo_intensity = params.fomo_intensity.value
     category_growth = params.category_growth.value
     product_adoption = params.product_adoption_rate.value
     requires_behavior_change = params.requires_behavior_change.value
+    category_penetration = params.category_penetration.value
+
+    # 6 product-perception params: per-agent arrays if stamped, else scalar fallback.
+    # When per-agent, these are full-population arrays that get [aware_mask]-sliced below.
+    has_agent_params = (
+        "agent_perceived_benefit" in agents.dtype.names
+        and agents["agent_perceived_benefit"].any()
+    )
+    if has_agent_params:
+        perceived_benefit = agents["agent_perceived_benefit"].astype(np.float64)
+        benefit_certainty = agents["agent_benefit_certainty"].astype(np.float64)
+        switching_cost = agents["agent_switching_cost"].astype(np.float64)
+        ref_price_value = agents["agent_reference_price"].astype(np.float64)
+        social_visibility = agents["agent_social_visibility"].astype(np.float64)
+        time_to_value = agents["agent_time_to_value"].astype(np.float64)
+    else:
+        perceived_benefit = params.perceived_benefit.value
+        benefit_certainty = params.benefit_certainty.value
+        switching_cost = params.switching_cost.value
+        ref_price_value = params.reference_price.value
+        social_visibility = params.social_visibility.value
+        time_to_value = params.time_to_value.value
 
     # Initialize force arrays with NaN for unaware agents
     forces = {
@@ -98,6 +113,22 @@ def compute_forces(
     conscien_a = conscien[aware_mask]
     novelty_a = novelty_w[aware_mask]
     price_sens_a = price_sens[aware_mask]
+
+    # Slice per-agent product params to aware subset (arrays) or keep scalar
+    if has_agent_params:
+        perceived_benefit_a = perceived_benefit[aware_mask]
+        benefit_certainty_a = benefit_certainty[aware_mask]
+        switching_cost_a = switching_cost[aware_mask]
+        ref_price_a = ref_price_value[aware_mask]
+        social_visibility_a = social_visibility[aware_mask]
+        time_to_value_a = time_to_value[aware_mask]
+    else:
+        perceived_benefit_a = perceived_benefit  # scalar, broadcasts naturally
+        benefit_certainty_a = benefit_certainty
+        switching_cost_a = switching_cost
+        ref_price_a = ref_price_value
+        social_visibility_a = social_visibility
+        time_to_value_a = time_to_value
 
     # ═══════════════════════════════════════════════════════════════
     # FORCE 1: PROSPECT VALUE (Kahneman & Tversky 1979/1992)
@@ -140,7 +171,7 @@ def compute_forces(
     novelty_premium = novelty_a * category_growth * 0.5
 
     # Agent-specific perceived gain
-    agent_gain = perceived_benefit * need_intensity * category_affinity + novelty_premium
+    agent_gain = perceived_benefit_a * need_intensity * category_affinity + novelty_premium
     agent_gain = np.clip(agent_gain, 0.01, 1.0)
 
     # Apply prospect theory value function: v(x) = x^α
@@ -170,12 +201,12 @@ def compute_forces(
         # ── FREE PRODUCT ──
         # Loss is effort-based: learning curve, data migration, cognitive
         # load of evaluating and switching. Even free products have costs.
-        switching_effort = switching_cost * 0.3
-        time_risk = (1.0 - time_to_value) * 0.2
+        switching_effort = switching_cost_a * 0.3
+        time_risk = (1.0 - time_to_value_a) * 0.2
         behavior_cost = requires_behavior_change * 0.2
 
         effort_loss = switching_effort + time_risk + behavior_cost
-        effort_loss = max(effort_loss, 0.01)
+        effort_loss = np.maximum(effort_loss, 0.01)
 
         # Apply loss aversion to effort costs — people overweight even
         # non-monetary losses. × 0.3 because non-monetary losses are
@@ -197,10 +228,12 @@ def compute_forces(
     # Per-agent reference price: modulated by their competitor awareness
     # Innovators know more competitors → their ref reflects full market
     # Laggards know fewer → their ref is skewed toward dominant player
-    if ref_price_value > 0 and price > 0:
+    # ref_price_a may be per-agent array or scalar
+    ref_has_value = np.any(ref_price_a > 0) if has_agent_params else ref_price_a > 0
+    if ref_has_value and price > 0:
         # Scale reference price by competitor awareness
         # Less aware agents anchor more to the dominant/cheapest option
-        agent_ref = ref_price_value * comp_frac_a + price * (1.0 - comp_frac_a)
+        agent_ref = ref_price_a * comp_frac_a + price * (1.0 - comp_frac_a)
         anchor = (agent_ref - price) / np.maximum(agent_ref, 1.0) * ANCHORING_WEIGHT
     else:
         anchor = np.zeros(la_a.shape)
@@ -223,7 +256,7 @@ def compute_forces(
     adoption_friction = 0.5 + 0.5 * requires_behavior_change
 
     # People IN the category: switching between products
-    switching_friction = 0.3 + 0.7 * switching_cost
+    switching_friction = 0.3 + 0.7 * switching_cost_a
 
     # Blend based on penetration:
     # Low penetration (0.10) → 90% face adoption_friction, 10% face switching
@@ -242,8 +275,8 @@ def compute_forces(
     # ═══════════════════════════════════════════════════════════════
     social = (
         spn_a
-        * np.log1p(product_adoption * social_visibility)
-        * (1.0 - benefit_certainty)
+        * np.log1p(product_adoption * social_visibility_a)
+        * (1.0 - benefit_certainty_a)
     )
     forces["social_proof"][aware_mask] = social
 
@@ -252,7 +285,7 @@ def compute_forces(
     # fomo_intensity × social_visibility × category_growth × social_proof_need
     # Distinct from loss aversion — this is opportunity-miss pain.
     # ═══════════════════════════════════════════════════════════════
-    fomo = fomo_intensity * social_visibility * category_growth * fomo_a
+    fomo = fomo_intensity * social_visibility_a * category_growth * fomo_a
     forces["fomo"][aware_mask] = fomo
 
     # ═══════════════════════════════════════════════════════════════
@@ -273,7 +306,7 @@ def compute_forces(
     agent_beta = np.clip(agent_beta, 0.1, 0.95)
 
     discount = -(
-        time_to_value * (1.0 - agent_beta) * perceived_benefit * DISCOUNT_SCALE
+        time_to_value_a * (1.0 - agent_beta) * perceived_benefit_a * DISCOUNT_SCALE
     )
     forces["hyperbolic_discounting"][aware_mask] = discount
 
@@ -281,7 +314,7 @@ def compute_forces(
     # FORCE 7: IDENTITY SIGNALING (Veblen 1899, Berger & Heath 2007)
     # openness × identity_signal × social_visibility × 0.2
     # ═══════════════════════════════════════════════════════════════
-    identity = open_a * identity_signal * social_visibility * IDENTITY_SCALE
+    identity = open_a * identity_signal * social_visibility_a * IDENTITY_SCALE
     forces["identity_signaling"][aware_mask] = identity
 
     return forces
