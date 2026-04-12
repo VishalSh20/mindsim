@@ -1,0 +1,83 @@
+# Default simulation parameters — used when --skip-research is passed
+# All values are behavioral science defaults from RESEARCH.md
+# Each has a basis explaining the rationale
+
+simulation_params:
+  reference_price:
+    value: 0.0
+    basis: "No competitor data — using product price as reference"
+    confidence: 0.3
+    components: []
+
+  category_penetration:
+    value: 0.15
+    basis: "Default assumption for emerging tech category"
+    confidence: 0.3
+
+  benefit_certainty:
+    value: 0.5
+    basis: "Moderate benefit certainty — typical for new product"
+    confidence: 0.4
+
+  time_to_value:
+    value: 0.3
+    basis: "Moderate time to realize value"
+    confidence: 0.4
+
+  requires_behavior_change:
+    value: 0.3
+    basis: "Low-moderate behavior change required"
+    confidence: 0.4
+
+  switching_cost:
+    value: 0.4
+    basis: "Moderate switching cost — some existing solutions"
+    confidence: 0.3
+
+  social_visibility:
+    value: 0.5
+    basis: "Moderate social visibility"
+    confidence: 0.4
+
+  identity_signal:
+    value: 0.3
+    basis: "Low-moderate identity signaling value"
+    confidence: 0.4
+
+  present_bias_beta:
+    value: 0.75
+    basis: "Midpoint between behavior-change (0.5) and consumption (0.85) — Augenblick 2015"
+    confidence: 0.6
+
+  fomo_intensity:
+    value: 0.4
+    basis: "Moderate FOMO intensity"
+    confidence: 0.4
+
+  category_growth:
+    value: 0.5
+    basis: "Moderate category growth rate"
+    confidence: 0.3
+
+  perceived_benefit:
+    value: 0.6
+    basis: "Moderate perceived benefit"
+    confidence: 0.4
+
+  product_adoption_rate:
+    value: 0.05
+    basis: "Low initial adoption for new product"
+    confidence: 0.3
+
+  awareness_by_archetype:
+    innovator: 0.90
+    early_adopter: 0.65
+    early_majority: 0.30
+    late_majority: 0.10
+    laggard: 0.02
+
+population_config:
+  income_distribution:
+    mean_log: 11.0
+    sigma: 0.7
+  market_segment: "general"

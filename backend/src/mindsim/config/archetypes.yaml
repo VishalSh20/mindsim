@@ -1,0 +1,238 @@
+# Rogers (1962) Diffusion of Innovations archetypes
+# Parameter distributions: mean, std for normal sampling
+# All values grounded in RESEARCH.md sources
+
+archetypes:
+  innovator:
+    share: 0.025
+    label: "Innovator"
+    description: "Technology enthusiasts, first to try new products"
+    distributions:
+      loss_aversion_lambda:
+        mean: 1.5
+        std: 0.3
+        min: 1.0
+        max: 2.5
+      status_quo_bias:
+        mean: 0.15
+        std: 0.08
+        min: 0.0
+        max: 0.5
+      social_proof_need:
+        mean: 0.2
+        std: 0.1
+        min: 0.0
+        max: 0.6
+      novelty_weight:
+        mean: 0.8
+        std: 0.15
+        min: 0.3
+        max: 1.0
+      price_sensitivity:
+        mean: 0.3
+        std: 0.15
+        min: 0.0
+        max: 0.8
+      fomo_susceptibility:
+        mean: 0.7
+        std: 0.15
+        min: 0.2
+        max: 1.0
+      openness:
+        mean: 0.78
+        std: 0.10
+        min: 0.4
+        max: 1.0
+    awareness:
+      product: 0.90
+      competitor_fraction: 0.90
+
+  early_adopter:
+    share: 0.135
+    label: "Early Adopter"
+    description: "Visionaries, opinion leaders who see strategic advantage"
+    distributions:
+      loss_aversion_lambda:
+        mean: 1.8
+        std: 0.4
+        min: 1.0
+        max: 3.0
+      status_quo_bias:
+        mean: 0.25
+        std: 0.10
+        min: 0.05
+        max: 0.6
+      social_proof_need:
+        mean: 0.35
+        std: 0.12
+        min: 0.1
+        max: 0.7
+      novelty_weight:
+        mean: 0.65
+        std: 0.15
+        min: 0.2
+        max: 1.0
+      price_sensitivity:
+        mean: 0.4
+        std: 0.15
+        min: 0.1
+        max: 0.8
+      fomo_susceptibility:
+        mean: 0.6
+        std: 0.15
+        min: 0.2
+        max: 0.9
+      openness:
+        mean: 0.68
+        std: 0.12
+        min: 0.3
+        max: 1.0
+    awareness:
+      product: 0.65
+      competitor_fraction: 0.70
+
+  early_majority:
+    share: 0.34
+    label: "Early Majority"
+    description: "Pragmatists, need proven solutions and social proof"
+    distributions:
+      loss_aversion_lambda:
+        mean: 2.25
+        std: 0.5
+        min: 1.0
+        max: 3.5
+      status_quo_bias:
+        mean: 0.45
+        std: 0.12
+        min: 0.15
+        max: 0.8
+      social_proof_need:
+        mean: 0.7
+        std: 0.12
+        min: 0.3
+        max: 1.0
+      novelty_weight:
+        mean: 0.4
+        std: 0.12
+        min: 0.1
+        max: 0.7
+      price_sensitivity:
+        mean: 0.55
+        std: 0.15
+        min: 0.2
+        max: 0.9
+      fomo_susceptibility:
+        mean: 0.45
+        std: 0.15
+        min: 0.1
+        max: 0.8
+      openness:
+        mean: 0.50
+        std: 0.12
+        min: 0.2
+        max: 0.8
+    awareness:
+      product: 0.30
+      competitor_fraction: 0.45
+
+  late_majority:
+    share: 0.34
+    label: "Late Majority"
+    description: "Conservatives, adopt under peer pressure and necessity"
+    distributions:
+      loss_aversion_lambda:
+        mean: 2.8
+        std: 0.5
+        min: 1.5
+        max: 4.0
+      status_quo_bias:
+        mean: 0.65
+        std: 0.12
+        min: 0.3
+        max: 0.9
+      social_proof_need:
+        mean: 0.8
+        std: 0.10
+        min: 0.5
+        max: 1.0
+      novelty_weight:
+        mean: 0.2
+        std: 0.10
+        min: 0.0
+        max: 0.5
+      price_sensitivity:
+        mean: 0.7
+        std: 0.12
+        min: 0.3
+        max: 1.0
+      fomo_susceptibility:
+        mean: 0.35
+        std: 0.15
+        min: 0.05
+        max: 0.7
+      openness:
+        mean: 0.38
+        std: 0.12
+        min: 0.1
+        max: 0.7
+    awareness:
+      product: 0.10
+      competitor_fraction: 0.20
+
+  laggard:
+    share: 0.16
+    label: "Laggard"
+    description: "Skeptics, resistant to change, adopt only when unavoidable"
+    distributions:
+      loss_aversion_lambda:
+        mean: 3.5
+        std: 0.6
+        min: 2.0
+        max: 5.0
+      status_quo_bias:
+        mean: 0.85
+        std: 0.10
+        min: 0.5
+        max: 1.0
+      social_proof_need:
+        mean: 0.5
+        std: 0.15
+        min: 0.2
+        max: 0.9
+      novelty_weight:
+        mean: 0.1
+        std: 0.08
+        min: 0.0
+        max: 0.3
+      price_sensitivity:
+        mean: 0.85
+        std: 0.10
+        min: 0.5
+        max: 1.0
+      fomo_susceptibility:
+        mean: 0.15
+        std: 0.10
+        min: 0.0
+        max: 0.4
+      openness:
+        mean: 0.28
+        std: 0.10
+        min: 0.05
+        max: 0.5
+    awareness:
+      product: 0.02
+      competitor_fraction: 0.10
+
+# Loss aversion mixture model (Gächter et al. 2022)
+# 80% from archetype distribution, 20% from near-zero subgroup
+loss_aversion_mixture:
+  archetype_weight: 0.80
+  near_zero_weight: 0.20
+  near_zero_mean: 1.1
+  near_zero_std: 0.2
+
+# Personality-economics correlations (from RESEARCH.md)
+correlations:
+  neuroticism_loss_aversion: 0.3    # Lauriola & Levin 2001
+  openness_novelty: 0.3             # Nicholson et al. 2005
+  agreeableness_social_proof: 0.4   # Empirical estimate
