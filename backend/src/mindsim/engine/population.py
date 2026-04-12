@@ -28,6 +28,7 @@ AGENT_DTYPE = np.dtype([
     ("openness", np.float32),
     ("neuroticism", np.float32),
     ("agreeableness", np.float32),
+    ("conscientiousness", np.float32),
     ("income", np.float32),
     ("aware", np.bool_),
     ("competitor_awareness_frac", np.float32),
@@ -73,17 +74,21 @@ def generate_population(
 
     # --- Sample personality traits (Big Five subset) ---
     # These are sampled independently first, then correlations applied
+    # Norms from Costa & McCrae 1992 NEO-PI-R, scaled to [0, 1]
     neuroticism = rng.normal(0.5, 0.15, size=n).astype(np.float32)
     openness_raw = rng.normal(0.5, 0.15, size=n).astype(np.float32)
     agreeableness_raw = rng.normal(0.5, 0.15, size=n).astype(np.float32)
+    conscientiousness_raw = rng.normal(0.5, 0.15, size=n).astype(np.float32)
 
     # Clip to [0, 1]
     neuroticism = np.clip(neuroticism, 0.0, 1.0)
     openness_raw = np.clip(openness_raw, 0.0, 1.0)
     agreeableness_raw = np.clip(agreeableness_raw, 0.0, 1.0)
+    conscientiousness_raw = np.clip(conscientiousness_raw, 0.0, 1.0)
 
     agents["neuroticism"] = neuroticism
     agents["agreeableness"] = agreeableness_raw
+    agents["conscientiousness"] = conscientiousness_raw
 
     # --- Sample behavioral parameters per archetype ---
     corr = archetype_set.correlations

@@ -53,6 +53,9 @@ def compute_forces(
     fomo_sus = agents["fomo_susceptibility"].astype(np.float64)
     openness = agents["openness"].astype(np.float64)
     comp_frac = agents["competitor_awareness_frac"].astype(np.float64)
+    conscien = agents["conscientiousness"].astype(np.float64)
+    novelty_w = agents["novelty_weight"].astype(np.float64)
+    price_sens = agents["price_sensitivity"].astype(np.float64)
 
     # Pre-extract sim params
     price = params.price
@@ -92,44 +95,98 @@ def compute_forces(
     fomo_a = fomo_sus[aware_mask]
     open_a = openness[aware_mask]
     comp_frac_a = comp_frac[aware_mask]
+    conscien_a = conscien[aware_mask]
+    novelty_a = novelty_w[aware_mask]
+    price_sens_a = price_sens[aware_mask]
 
     # ═══════════════════════════════════════════════════════════════
     # FORCE 1: PROSPECT VALUE (Kahneman & Tversky 1979/1992)
     #
-    # GAIN = perceived_benefit ^ α
+    # Agent-modulated on BOTH sides:
     #
-    # LOSS = λ × loss_input ^ β, where loss_input combines:
-    #   1. Reference-price-relative loss ("is this expensive for what it is?")
-    #   2. Absolute subscription pain (log scale, $0=none, $20=moderate, $100+=major)
-    #   3. Income relief (high income reduces pain, doesn't eliminate it)
+    # GAIN varies by agent need intensity, category affinity, and
+    # novelty seeking — different agents value the same product
+    # differently based on personality and situation.
+    #
+    # LOSS varies by agent income (price as fraction of discretionary
+    # income), loss aversion λ, and price sensitivity. For free
+    # products, loss is effort-based (switching, learning, habit change)
+    # modulated by openness and loss aversion.
     # ═══════════════════════════════════════════════════════════════
-    gain = np.power(np.clip(perceived_benefit, 1e-10, None), ALPHA)
+
+    # ── GAIN SIDE — per-agent perceived value ──
+
+    # 1. Need intensity: how badly does THIS agent want this category?
+    #    Conscientiousness → values productivity/organization tools
+    #    Openness → receptive to trying new products
+    #    Competitor awareness → already has alternatives, less excited
+    need_intensity = (
+        0.5
+        + 0.3 * conscien_a
+        + 0.2 * open_a
+        - 0.3 * comp_frac_a
+    )
+    need_intensity = np.clip(need_intensity, 0.2, 1.0)
+
+    # 2. Category affinity: would this agent use the product regularly?
+    category_affinity = (
+        0.4
+        + 0.3 * conscien_a
+        + 0.3 * (1.0 - price_sens_a)
+    )
+    category_affinity = np.clip(category_affinity, 0.3, 1.0)
+
+    # 3. Novelty premium: novelty seekers get extra value from new things
+    novelty_premium = novelty_a * category_growth * 0.5
+
+    # Agent-specific perceived gain
+    agent_gain = perceived_benefit * need_intensity * category_affinity + novelty_premium
+    agent_gain = np.clip(agent_gain, 0.01, 1.0)
+
+    # Apply prospect theory value function: v(x) = x^α
+    v_gain = np.power(agent_gain, ALPHA)
+
+    # ── LOSS SIDE — per-agent cost perception ──
 
     if price > 0:
-        # Component 1: Price relative to reference price
-        # price_ratio > 1 means expensive vs reference, < 1 means cheap
-        effective_ref = max(ref_price_value, 1.0)
-        price_ratio = price / effective_ref
-        relative_loss = np.maximum(0.0, (price_ratio - 1.0) / price_ratio)
+        # ── PAID PRODUCT ──
+        # Price pain is relative to what the agent can afford
+        discretionary_income = income_a * 0.3  # ~30% of gross is discretionary
+        discretionary_income = np.maximum(discretionary_income, 500.0)
 
-        # Component 2: Absolute monthly subscription pain (log scale)
-        # $0=0, $10≈0.35, $20≈0.46, $50≈0.75, $200≈1.27
-        absolute_pain = np.log1p(price / 10.0) / np.log1p(10.0)
+        # Annual cost as fraction of discretionary income
+        annual_cost = price * 12.0  # assume monthly subscription
+        price_fraction = annual_cost / discretionary_income
+        price_fraction = np.clip(price_fraction, 0.0, 1.0)
 
-        # Component 3: Income reduces pain by up to 40%
-        monthly_income = income_a / 12.0
-        income_relief = 0.4 * np.minimum(1.0, monthly_income / 15000.0)
+        # Prospect theory loss: v(x) = λ × |x|^β
+        v_loss = la_a * np.power(price_fraction, BETA_PT)
 
-        # Combined loss input (0-1+ scale)
-        loss_input = (relative_loss * 0.5 + absolute_pain * 0.5) * (1.0 - income_relief)
-        loss_input = np.clip(loss_input, 1e-10, None)
+        # Price sensitivity amplifier (some agents are more price-conscious
+        # regardless of actual affordability)
+        v_loss *= (0.5 + 0.5 * price_sens_a)
 
-        loss = la_a * np.power(loss_input, BETA_PT)
     else:
-        # Free product: no loss
-        loss = np.zeros_like(la_a)
+        # ── FREE PRODUCT ──
+        # Loss is effort-based: learning curve, data migration, cognitive
+        # load of evaluating and switching. Even free products have costs.
+        switching_effort = switching_cost * 0.3
+        time_risk = (1.0 - time_to_value) * 0.2
+        behavior_cost = requires_behavior_change * 0.2
 
-    prospect = gain - loss
+        effort_loss = switching_effort + time_risk + behavior_cost
+        effort_loss = max(effort_loss, 0.01)
+
+        # Apply loss aversion to effort costs — people overweight even
+        # non-monetary losses. × 0.3 because non-monetary losses are
+        # felt less intensely than equivalent monetary ones.
+        v_loss = la_a * np.power(effort_loss, BETA_PT) * 0.3
+
+        # Openness reduces effort aversion — open people don't mind
+        # the hassle of trying new things
+        v_loss *= (0.3 + 0.7 * (1.0 - open_a))
+
+    prospect = v_gain - v_loss
     forces["prospect_value"][aware_mask] = prospect
 
     # ═══════════════════════════════════════════════════════════════

@@ -1,10 +1,11 @@
 """All system prompts for mindsim LLM calls — centralized in one file.
 
-4 prompts total:
-  UNDERSTAND_PROMPT — extracts ProductProfile + ResearchPlan (Stage 1)
-  CALIBRATE_PROMPT  — assigns ALL numerical params (Stage 3)
-  EVENT_PROMPT      — interprets events into force adjustments (Stage 4e)
-  ANALYZE_PROMPT    — generates behavioral audit prose (Stage 5d)
+5 prompts total:
+  UNDERSTAND_PROMPT  — extracts ProductProfile + ResearchPlan (Stage 1)
+  VALIDATION_PROMPT  — cross-checks extracted data against raw input (Stage 1b)
+  CALIBRATE_PROMPT   — assigns ALL numerical params (Stage 3)
+  EVENT_PROMPT       — interprets events into force adjustments (Stage 4e)
+  ANALYZE_PROMPT     — generates behavioral audit prose (Stage 5d)
 """
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -56,6 +57,46 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
         "trigger_condition": "when to run this query"
       }
     ]
+  }
+}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════
+# STAGE 1b: VALIDATION
+# Input: raw user text + extracted JSON
+# Output: corrections for any misextracted fields
+# Catches errors like "competing with free apps" being misread as product=free
+# ═══════════════════════════════════════════════════════════════════════
+
+VALIDATION_PROMPT = """\
+You are a data validation agent. Your ONLY job is to check whether the extracted product \
+data matches what the user actually said.
+
+Check each field against the original input. For each field that is WRONG, provide the \
+correct value. Focus especially on:
+1. Price — does the extracted price match any dollar amount the user mentioned for THEIR product?
+2. Price model — did the user say "free", "subscription", "one-time", etc. about THEIR product?
+3. Competitors — are all user-mentioned competitors captured? Are any hallucinated?
+4. Category — does the extracted category match the product described?
+
+CRITICAL: Distinguish between the PRODUCT's price and COMPETITOR prices. If the user says \
+"A $10/month app competing with free alternatives", the product price is $10, NOT free.
+
+Return ONLY valid JSON:
+
+{
+  "validations": [
+    {
+      "field": "field_name",
+      "status": "CORRECT|WRONG|UNCERTAIN",
+      "extracted_value": "what was extracted",
+      "correct_value": "what it should be (only for WRONG)",
+      "reason": "explanation"
+    }
+  ],
+  "has_critical_errors": true/false,
+  "corrected_fields": {
+    "field_name": corrected_value
   }
 }
 """

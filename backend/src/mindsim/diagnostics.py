@@ -34,7 +34,7 @@ class DiagnosticDump:
 
     def record_understand(self, profile) -> None:
         """Record Stage 1: Understand output."""
-        self.data["stages"]["1_understand"] = {
+        stage_data = {
             "product_name": profile.name,
             "price": profile.price,
             "price_model": profile.price_model,
@@ -68,6 +68,25 @@ class DiagnosticDump:
                 ],
             },
         }
+
+        # Include validation results if available
+        validation = getattr(profile, "_validation", None)
+        if validation is not None:
+            stage_data["validation"] = {
+                "has_critical_errors": validation.get("has_critical_errors", False),
+                "corrections_applied": [
+                    {
+                        "field": v.get("field"),
+                        "extracted_value": v.get("extracted_value"),
+                        "correct_value": v.get("correct_value"),
+                        "reason": v.get("reason"),
+                    }
+                    for v in validation.get("validations", [])
+                    if v.get("status") == "WRONG"
+                ],
+            }
+
+        self.data["stages"]["1_understand"] = stage_data
 
     def record_research(self, market) -> None:
         """Record Stage 2: Research output."""
@@ -189,6 +208,7 @@ class DiagnosticDump:
                     "openness": round(float(agents[i]["openness"]), 4),
                     "neuroticism": round(float(agents[i]["neuroticism"]), 4),
                     "agreeableness": round(float(agents[i]["agreeableness"]), 4),
+                    "conscientiousness": round(float(agents[i]["conscientiousness"]), 4),
                     "novelty_weight": round(float(agents[i]["novelty_weight"]), 4),
                     "price_sensitivity": round(float(agents[i]["price_sensitivity"]), 4),
                     "competitor_awareness_frac": round(float(agents[i]["competitor_awareness_frac"]), 4),
