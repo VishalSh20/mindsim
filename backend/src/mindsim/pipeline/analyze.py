@@ -51,17 +51,18 @@ def analyze(
         raise ValueError("SimulationResult missing agent data for analysis")
 
     # 5a. SENSITIVITY ANALYSIS
+    # All user-facing metrics use total_adoption (adoption among ALL agents)
     logger.info("Running sensitivity analysis...")
     sensitivity = run_sensitivity_analysis(
         agents=agents,
         config=config,
-        base_adoption=sim_result.aware_adoption,
+        base_adoption=sim_result.total_adoption,
         rng=rng,
     )
 
     # 5b. CONFIDENCE BAND (RSS of swings)
     confidence_band = _compute_confidence_band(
-        central=sim_result.aware_adoption,
+        central=sim_result.total_adoption,
         sensitivity_results=sensitivity,
     )
 
@@ -70,7 +71,7 @@ def analyze(
     interventions = rank_interventions(
         agents=agents,
         config=config,
-        base_adoption=sim_result.aware_adoption,
+        base_adoption=sim_result.total_adoption,
         rng=rng,
     )
 

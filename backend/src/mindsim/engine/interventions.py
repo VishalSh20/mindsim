@@ -120,11 +120,11 @@ def rank_interventions(
         forces = compute_forces(agents, modified_params)
         _, decisions = compute_decisions(forces, rng=rng)
 
-        aware_mask = agents["aware"]
-        if aware_mask.sum() == 0:
+        n_total = len(agents)
+        if n_total == 0:
             new_adoption = 0.0
         else:
-            new_adoption = float(decisions[aware_mask].sum() / aware_mask.sum())
+            new_adoption = float(decisions.sum() / n_total)
 
         lift = (new_adoption - base_adoption) * 100.0  # percentage points
 

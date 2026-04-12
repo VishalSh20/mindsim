@@ -131,7 +131,7 @@ def _rerun_with_override(
     """Rerun simulation with a single param overridden.
 
     Creates a modified copy of params and runs forces + decisions.
-    Returns adoption rate among aware agents.
+    Returns total adoption rate (adopted / all agents).
     """
     # Deep copy params and override one field
     modified = params.model_copy(deep=True)
@@ -141,11 +141,11 @@ def _rerun_with_override(
     forces = compute_forces(agents, modified)
     adopt_prob, decisions = compute_decisions(forces, rng=rng)
 
-    aware_mask = agents["aware"]
-    if aware_mask.sum() == 0:
+    n_total = len(agents)
+    if n_total == 0:
         return 0.0
 
-    return float(decisions[aware_mask].sum() / aware_mask.sum())
+    return float(decisions.sum() / n_total)
 
 
 def _rerun_with_ref_price_override(
@@ -154,15 +154,18 @@ def _rerun_with_ref_price_override(
     new_ref_price: float,
     rng: np.random.Generator,
 ) -> float:
-    """Rerun simulation with reference_price overridden."""
+    """Rerun simulation with reference_price overridden.
+
+    Returns total adoption rate (adopted / all agents).
+    """
     modified = params.model_copy(deep=True)
     modified.reference_price.value = new_ref_price
 
     forces = compute_forces(agents, modified)
     adopt_prob, decisions = compute_decisions(forces, rng=rng)
 
-    aware_mask = agents["aware"]
-    if aware_mask.sum() == 0:
+    n_total = len(agents)
+    if n_total == 0:
         return 0.0
 
-    return float(decisions[aware_mask].sum() / aware_mask.sum())
+    return float(decisions.sum() / n_total)

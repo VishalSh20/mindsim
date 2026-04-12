@@ -87,12 +87,12 @@ def process_event(
         rng=rng,
     )
 
-    # Build event result
+    # Build event result — all user-facing metrics use total_adoption
     event_result = EventResult(
         event_text=event_text,
-        adoption_before=sim_result.aware_adoption,
-        adoption_after=new_result.aware_adoption,
-        adoption_delta=new_result.aware_adoption - sim_result.aware_adoption,
+        adoption_before=sim_result.total_adoption,
+        adoption_after=new_result.total_adoption,
+        adoption_delta=new_result.total_adoption - sim_result.total_adoption,
         force_adjustments=force_adjustments,
         segment_effects=data.get("segment_effects", {}),
         second_order_effects=data.get("second_order_effects", []),
@@ -101,8 +101,8 @@ def process_event(
     new_result.event_results.append(event_result)
 
     logger.info(
-        f"Event processed: adoption {sim_result.aware_adoption*100:.1f}% → "
-        f"{new_result.aware_adoption*100:.1f}% "
+        f"Event processed: adoption {sim_result.total_adoption*100:.1f}% → "
+        f"{new_result.total_adoption*100:.1f}% "
         f"({event_result.adoption_delta*100:+.1f}pp)"
     )
 
@@ -118,13 +118,15 @@ def _build_event_context(
     forces = sim_result.force_decomposition.as_dict()
     params = config.simulation_params
 
+    awareness_pct = sim_result.n_aware / max(sim_result.n_agents, 1) * 100
     parts = [
         f"# MARKET EVENT",
         f'"{event_text}"',
         "",
         f"# CURRENT SIMULATION STATE",
-        f"Adoption rate: {sim_result.aware_adoption*100:.1f}%",
-        f"Aware agents: {sim_result.n_aware}/{sim_result.n_agents}",
+        f"Total adoption: {sim_result.total_adoption*100:.1f}% of all agents",
+        f"Aware adoption: {sim_result.aware_adoption*100:.1f}% of aware agents",
+        f"Awareness: {sim_result.n_aware}/{sim_result.n_agents} ({awareness_pct:.0f}%)",
         "",
         "## Current Force Decomposition (convertible pool averages)",
     ]
