@@ -1,5 +1,7 @@
 """SimulationResult + AnalysisReport — output data structures."""
 
+from typing import Any, Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -148,3 +150,61 @@ class AnalysisReport(BaseModel):
 
     # Assumptions table
     assumptions: list[dict] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# v2-middle additions (Wave 0): new models wired up in later waves.
+# ---------------------------------------------------------------------------
+
+
+class RoundSnapshot(BaseModel):
+    """Per-round state snapshot from the multi-round simulation (Wave 3)."""
+
+    round: int
+    phase_counts: dict[str, int] = Field(default_factory=dict)
+    cluster_adoption: dict[int, float] = Field(default_factory=dict)
+    total_adoption: float = 0.0
+    aware_count: int = 0
+
+
+class ProsConsItem(BaseModel):
+    """Triangulated pros/cons claim — requires both simulation and VoC evidence.
+
+    `polarity="nuance"` is used when only one evidence source supports the claim.
+    """
+
+    statement: str
+    polarity: Literal["pro", "con", "nuance"]
+    segments: list[str] = Field(default_factory=list)
+    mechanism: str = ""
+    simulation_evidence: dict[str, Any] = Field(default_factory=dict)
+    voc_evidence: list[str] = Field(default_factory=list)  # quote_ids
+
+
+class AdoptionSummary(BaseModel):
+    total: float = 0.0
+    aware: float = 0.0
+    time_to_50pct: int | None = None
+    chasm_round: int | None = None
+
+
+class ForceDominance(BaseModel):
+    top_driver: str = ""
+    top_blocker: str = ""
+    segment_variance: dict[str, float] = Field(default_factory=dict)
+
+
+class CascadeMetrics(BaseModel):
+    first_cluster_crossed_critical_mass: int | None = None
+    cluster_spread_rounds: dict[int, int] = Field(default_factory=dict)
+
+
+class KPIDashboard(BaseModel):
+    """Structured KPIs mined from the SimulationResult (Wave 8)."""
+
+    adoption: AdoptionSummary = Field(default_factory=AdoptionSummary)
+    force_dominance: ForceDominance = Field(default_factory=ForceDominance)
+    convertible_pool: int = 0
+    cascade: CascadeMetrics | None = None
+    top_sensitivity_params: list[str] = Field(default_factory=list)
+    validation_score: float | None = None
