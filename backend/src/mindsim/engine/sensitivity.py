@@ -1,20 +1,31 @@
 """Sensitivity analysis — ±30% rerun on uncertain parameters.
 
-Pure recomputation, no LLM calls. For every parameter with
-confidence < 0.8, reruns simulation at ±30% and records adoption swing.
-"""
+Pure recomputation, no LLM calls. For every parameter with confidence
+below a threshold (default 0.80), reruns the **full multi-round**
+simulation at ±30% and records adoption swing in percentage points.
 
+v2-middle Wave 3 change: pre-Wave-3 sensitivity ran a single-shot
+compute_forces + compute_decisions. With the multi-round loop in place,
+we now invoke `simulate()` directly per perturbation so the sensitivity
+numbers reflect the same mechanics the main run uses (state transitions,
+awareness decay, lock-in, churn).
+
+Cost: ~12 params × 2 perturbations × 8 rounds ≈ 192 force computations,
+plus 24 population regenerations. Typical run ~3-5 s for 1000 agents.
+"""
 from __future__ import annotations
+
+import logging
 
 import numpy as np
 
-from mindsim.engine.forces import compute_decisions, compute_forces
-from mindsim.engine.population import restamp_agent_param
 from mindsim.models.config import CalibratedParam, SimulationConfig, SimulationParams
 from mindsim.models.results import SensitivityResult
 
+logger = logging.getLogger(__name__)
 
-# Parameters eligible for sensitivity analysis
+
+# Parameters eligible for sensitivity analysis.
 SENSITIVE_PARAMS = [
     "category_penetration",
     "benefit_certainty",
@@ -31,64 +42,61 @@ SENSITIVE_PARAMS = [
 
 
 def run_sensitivity_analysis(
-    agents: np.ndarray,
+    agents: np.ndarray | None,
     config: SimulationConfig,
     base_adoption: float,
     swing_fraction: float = 0.30,
     confidence_threshold: float = 0.80,
     rng: np.random.Generator | None = None,
+    n_agents: int = 1000,
 ) -> list[SensitivityResult]:
-    """Run sensitivity analysis on uncertain parameters.
-
-    For each param with confidence < threshold:
-        1. Set param to value × (1 - swing)
-        2. Rerun forces + decisions
-        3. Record adoption rate (low)
-        4. Set param to value × (1 + swing)
-        5. Rerun forces + decisions
-        6. Record adoption rate (high)
-        7. swing = high - low (in percentage points)
+    """Run sensitivity analysis on uncertain parameters over the full
+    multi-round simulation.
 
     Args:
-        agents: Agent array (pre-generated, reused).
+        agents: Unused in Wave 3 — retained for back-compat callers.
+            Multi-round sensitivity regenerates agents each perturbation.
         config: Current SimulationConfig.
         base_adoption: Base adoption rate to compare against.
         swing_fraction: How much to perturb (0.30 = ±30%).
         confidence_threshold: Only test params below this confidence.
         rng: Random number generator for stable results.
+        n_agents: Number of agents to simulate per perturbation.
 
     Returns:
         List of SensitivityResult, sorted by swing magnitude (descending).
     """
-    if rng is None:
-        rng = np.random.default_rng(42)  # fixed seed for reproducible sensitivity
+    # Import here to avoid a circular dependency between sensitivity and
+    # simulate (both live in different packages but both reference forces).
+    from mindsim.pipeline.simulate import simulate
 
-    results = []
+    if rng is None:
+        rng = np.random.default_rng(42)  # fixed seed for stable sensitivity
+
+    results: list[SensitivityResult] = []
     params = config.simulation_params
 
     for param_name in SENSITIVE_PARAMS:
-        cparam: CalibratedParam = getattr(params, param_name, None)
+        cparam: CalibratedParam | None = getattr(params, param_name, None)
         if cparam is None:
             continue
         if cparam.confidence >= confidence_threshold:
             continue
 
         base_value = cparam.value
-
-        # --- Low scenario (param -30%) ---
         low_value = base_value * (1.0 - swing_fraction)
-        low_adoption = _rerun_with_override(
-            agents, params, param_name, low_value, rng
-        )
-
-        # --- High scenario (param +30%) ---
         high_value = base_value * (1.0 + swing_fraction)
-        high_adoption = _rerun_with_override(
-            agents, params, param_name, high_value, rng
+
+        low_adoption = _rerun_full_sim(
+            config, param_name=param_name, new_value=low_value,
+            rng=_child_rng(rng, f"{param_name}_lo"), n_agents=n_agents, simulate_fn=simulate,
+        )
+        high_adoption = _rerun_full_sim(
+            config, param_name=param_name, new_value=high_value,
+            rng=_child_rng(rng, f"{param_name}_hi"), n_agents=n_agents, simulate_fn=simulate,
         )
 
         swing_pp = abs(high_adoption - low_adoption) * 100.0
-
         results.append(SensitivityResult(
             parameter=param_name,
             base_adoption=base_adoption,
@@ -98,14 +106,18 @@ def run_sensitivity_analysis(
             confidence=cparam.confidence,
         ))
 
-    # Reference price (ReferencePriceParam, not CalibratedParam — handle separately)
+    # Reference price (ReferencePriceParam — separate path)
     ref = params.reference_price
     if ref.value > 0 and ref.confidence < confidence_threshold:
-        low_adoption = _rerun_with_ref_price_override(
-            agents, params, ref.value * (1.0 - swing_fraction), rng
+        low_adoption = _rerun_full_sim(
+            config, param_name="reference_price",
+            new_value=ref.value * (1.0 - swing_fraction),
+            rng=_child_rng(rng, "ref_lo"), n_agents=n_agents, simulate_fn=simulate,
         )
-        high_adoption = _rerun_with_ref_price_override(
-            agents, params, ref.value * (1.0 + swing_fraction), rng
+        high_adoption = _rerun_full_sim(
+            config, param_name="reference_price",
+            new_value=ref.value * (1.0 + swing_fraction),
+            rng=_child_rng(rng, "ref_hi"), n_agents=n_agents, simulate_fn=simulate,
         )
         swing_pp = abs(high_adoption - low_adoption) * 100.0
         results.append(SensitivityResult(
@@ -117,64 +129,36 @@ def run_sensitivity_analysis(
             confidence=ref.confidence,
         ))
 
-    # Sort by swing magnitude (biggest uncertainty first)
     results.sort(key=lambda r: r.swing, reverse=True)
     return results
 
 
-def _rerun_with_override(
-    agents: np.ndarray,
-    params: SimulationParams,
+def _rerun_full_sim(
+    config: SimulationConfig,
     param_name: str,
     new_value: float,
     rng: np.random.Generator,
+    n_agents: int,
+    simulate_fn,
 ) -> float:
-    """Rerun simulation with a single param overridden.
+    """Run a full multi-round simulation with a single param overridden."""
+    modified = config.model_copy(deep=True)
+    if param_name == "reference_price":
+        modified.simulation_params.reference_price.value = new_value
+    else:
+        cparam = getattr(modified.simulation_params, param_name)
+        cparam.value = new_value
 
-    Creates a modified copy of params, re-stamps the corresponding
-    per-agent field, and runs forces + decisions.
-    Returns total adoption rate (adopted / all agents).
+    result = simulate_fn(config=modified, n_agents=n_agents, rng=rng)
+    return float(result.total_adoption)
+
+
+def _child_rng(parent: np.random.Generator, tag: str) -> np.random.Generator:
+    """Derive a deterministic child RNG from a parent + string tag.
+
+    Ensures each perturbation uses its own stream but the overall run
+    remains reproducible given the parent seed.
     """
-    modified = params.model_copy(deep=True)
-    cparam = getattr(modified, param_name)
-    cparam.value = new_value
-
-    # Re-stamp per-agent field if agents have archetype-specific params
-    agents_copy = agents.copy()
-    restamp_agent_param(agents_copy, param_name, cparam, rng)
-
-    forces = compute_forces(agents_copy, modified)
-    adopt_prob, decisions = compute_decisions(forces, rng=rng)
-
-    n_total = len(agents)
-    if n_total == 0:
-        return 0.0
-
-    return float(decisions.sum() / n_total)
-
-
-def _rerun_with_ref_price_override(
-    agents: np.ndarray,
-    params: SimulationParams,
-    new_ref_price: float,
-    rng: np.random.Generator,
-) -> float:
-    """Rerun simulation with reference_price overridden.
-
-    Returns total adoption rate (adopted / all agents).
-    """
-    modified = params.model_copy(deep=True)
-    modified.reference_price.value = new_ref_price
-
-    # Re-stamp per-agent reference price
-    agents_copy = agents.copy()
-    restamp_agent_param(agents_copy, "reference_price", modified.reference_price, rng)
-
-    forces = compute_forces(agents_copy, modified)
-    adopt_prob, decisions = compute_decisions(forces, rng=rng)
-
-    n_total = len(agents)
-    if n_total == 0:
-        return 0.0
-
-    return float(decisions.sum() / n_total)
+    # Simple hash of tag into an int32 seed; combined with parent state.
+    tag_hash = int(abs(hash(tag)) % (2**31))
+    return np.random.default_rng(parent.integers(0, 2**31) ^ tag_hash)
