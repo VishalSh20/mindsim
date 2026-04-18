@@ -27,8 +27,32 @@ class InterventionSpec:
     mode: str = "multiply"  # "multiply" or "set"
 
 
-# Standard interventions per ARCHITECTURE.md Stage 5c
-STANDARD_INTERVENTIONS: list[InterventionSpec] = [
+# v2-middle: the v1 "parameter-hack" interventions are DISABLED until Wave 7
+# rewrites them as explicit phase mechanisms.
+#
+# The old specs hacked a param multiplier and re-ran the sim. That worked
+# under v1 force math but produces misleading results once Wave 1 + Wave 2
+# land — notably:
+#   * Free trial sets price=0 but the delayed-benefit multiplicative rule
+#     (Wave 1) still fires on the trial because `requires_behavior_change`
+#     and feature-level time_to_value are unchanged; adoption goes DOWN.
+#   * Freemium / Social proof push multipliers now interact with the
+#     Tversky-Kahneman probability weighting on certainty in ways that can
+#     flip their sign depending on baseline certainty.
+#   * None of them carry cost or timeline — they look free and instant,
+#     which drives ranking toward interventions that would be expensive or
+#     slow in practice.
+#
+# Wave 7 fixes this properly: free trial becomes a `considering→trialing`
+# phase transition, price cuts operate through the per-agent reference
+# price, and every intervention carries cost + timeline so ranking is by
+# cost-per-adoption-lift rather than raw lift.
+#
+# DEPRECATED_V1_INTERVENTIONS is kept below purely as a reference for the
+# Wave 7 author — not invoked by any code path.
+STANDARD_INTERVENTIONS: list[InterventionSpec] = []
+
+DEPRECATED_V1_INTERVENTIONS: list[InterventionSpec] = [
     InterventionSpec(
         name="Free trial",
         description="Offer a free trial to eliminate upfront cost",
