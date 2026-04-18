@@ -137,6 +137,11 @@ class SimulationParams(BaseModel):
     # Awareness
     awareness: AwarenessByArchetype = Field(default_factory=AwarenessByArchetype)
 
+    # v2-middle Wave 1: modelling constants, not LLM-tuned.
+    # Stored on the config so downstream waves can read them uniformly.
+    consideration_threshold: float = 0.45  # set by maturity in Wave 5; consumed in Wave 3
+    probability_weighting_gamma: float = 0.61  # Tversky & Kahneman 1992
+
 
 class SimulationConfig(BaseModel):
     """Complete simulation config — output of the calibrate stage."""

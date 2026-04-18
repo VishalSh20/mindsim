@@ -97,21 +97,50 @@ class TestForceDirections:
 
         assert f_high["status_quo"][0] < f_low["status_quo"][0]
 
-    def test_anchoring_positive_when_below_reference(self):
-        """Product below reference price → positive anchoring."""
-        agent = _make_agent(competitor_awareness_frac=1.0)
-        params = _default_params(price=10.0)
-        params.reference_price.value = 50.0
-        forces = compute_forces(agent, params)
-        assert forces["anchoring"][0] > 0
+    def test_anchoring_force_is_always_zero(self):
+        """v2-middle §R1: standalone anchoring force is deleted.
 
-    def test_anchoring_negative_when_above_reference(self):
-        """Product above reference price → negative anchoring."""
+        The effect is now absorbed into prospect loss. The field is kept
+        in the forces dict only for schema compatibility.
+        """
         agent = _make_agent(competitor_awareness_frac=1.0)
-        params = _default_params(price=50.0)
-        params.reference_price.value = 10.0
-        forces = compute_forces(agent, params)
-        assert forces["anchoring"][0] < 0
+        below = _default_params(price=10.0)
+        below.reference_price.value = 50.0
+        above = _default_params(price=50.0)
+        above.reference_price.value = 10.0
+
+        assert compute_forces(agent, below)["anchoring"][0] == 0.0
+        assert compute_forces(agent, above)["anchoring"][0] == 0.0
+
+    def test_prospect_absorbs_below_reference_anchor(self):
+        """When price < reference, the prospect loss is reduced.
+
+        This used to be an additive anchoring force; v2-middle §R1 folds
+        it into the prospect computation via REF_RATIO. So the product
+        that sits below reference should have a *larger* (less negative)
+        prospect than an at-reference comparison.
+        """
+        agent = _make_agent(competitor_awareness_frac=1.0)
+        at_ref = _default_params(price=20.0)
+        at_ref.reference_price.value = 20.0
+        below_ref = _default_params(price=20.0)
+        below_ref.reference_price.value = 50.0
+
+        p_at = compute_forces(agent, at_ref)["prospect_value"][0]
+        p_below = compute_forces(agent, below_ref)["prospect_value"][0]
+        assert p_below > p_at
+
+    def test_prospect_absorbs_above_reference_anchor(self):
+        """When price > reference, prospect loss grows."""
+        agent = _make_agent(competitor_awareness_frac=1.0)
+        at_ref = _default_params(price=20.0)
+        at_ref.reference_price.value = 20.0
+        above_ref = _default_params(price=20.0)
+        above_ref.reference_price.value = 10.0
+
+        p_at = compute_forces(agent, at_ref)["prospect_value"][0]
+        p_above = compute_forces(agent, above_ref)["prospect_value"][0]
+        assert p_above < p_at
 
     def test_social_proof_scales_with_uncertainty(self):
         """Social proof stronger when benefit is uncertain."""

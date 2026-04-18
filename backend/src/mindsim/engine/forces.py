@@ -17,13 +17,23 @@ from __future__ import annotations
 
 import numpy as np
 
+from mindsim.engine.force_config import (
+    BEHAVIOR_CHANGE_THRESHOLD,
+    DELAYED_BENEFIT_THRESHOLD,
+    DELAYED_PENALTY_WEIGHT,
+    REF_RATIO_CEIL,
+    REF_RATIO_FLOOR,
+)
+from mindsim.engine.probability_weighting import probability_weight
 from mindsim.models.config import SimulationParams
 
 
 # Prospect theory constants (Tversky & Kahneman 1992)
 ALPHA = 0.88  # gain curvature
 BETA_PT = 0.88  # loss curvature (distinct from present_bias_beta)
-ANCHORING_WEIGHT = 0.3  # anchor effect scaling
+# ANCHORING_WEIGHT removed in v2-middle Wave 1: the standalone anchoring
+# force is deleted and its effect is absorbed into prospect loss via
+# REF_RATIO_{FLOOR,CEIL} in force_config.
 IDENTITY_SCALE = 0.2  # identity signaling scaling
 DISCOUNT_SCALE = 0.3  # hyperbolic discounting scaling
 
@@ -197,6 +207,19 @@ def compute_forces(
         # regardless of actual affordability)
         v_loss *= (0.5 + 0.5 * price_sens_a)
 
+        # v2-middle §R1: Anchoring is absorbed into prospect loss, not a
+        # separate additive force. When price is below the agent's reference,
+        # the loss shrinks proportionally; when price is above, it grows.
+        # Bounded by REF_RATIO_{FLOOR,CEIL} to prevent runaway.
+        agent_ref_full = ref_price_a * comp_frac_a + price * (1.0 - comp_frac_a)
+        ref_ratio = np.where(
+            agent_ref_full > 1.0,
+            price / np.maximum(agent_ref_full, 1.0),
+            1.0,
+        )
+        ref_ratio = np.clip(ref_ratio, REF_RATIO_FLOOR, REF_RATIO_CEIL)
+        v_loss = v_loss * ref_ratio
+
     else:
         # ── FREE PRODUCT ──
         # Loss is effort-based: learning curve, data migration, cognitive
@@ -217,28 +240,40 @@ def compute_forces(
         # the hassle of trying new things
         v_loss *= (0.3 + 0.7 * (1.0 - open_a))
 
-    prospect = v_gain - v_loss
+    # v2-middle §R10 / Gap 5: Loss × discount multiplicative rule.
+    # For products with upfront cost AND delayed benefit, hyperbolic
+    # discounting compounds with prospect loss rather than being a
+    # separate additive penalty. Applied by discounting the gain side
+    # by the agent's present-bias factor; the discount force is zeroed
+    # for these agents later to avoid double-counting.
+    #
+    # Agent beta is computed inside Force 6 below; pre-compute here so
+    # it's available for the prospect multiplier.
+    agent_beta_pre = np.clip(present_bias_beta + 0.3 * (open_a - 0.5), 0.1, 0.95)
+    delayed_benefit_mask = (requires_behavior_change > BEHAVIOR_CHANGE_THRESHOLD) & (
+        np.asarray(time_to_value_a) > DELAYED_BENEFIT_THRESHOLD
+    )
+    # Where delayed: multiply gain by present-bias factor (future gains hurt).
+    gain_multiplier = np.where(delayed_benefit_mask, agent_beta_pre, 1.0)
+    v_gain_effective = v_gain * gain_multiplier
+
+    prospect = v_gain_effective - v_loss
     forces["prospect_value"][aware_mask] = prospect
 
     # ═══════════════════════════════════════════════════════════════
-    # FORCE 2: REFERENCE PRICE ANCHORING (Tversky & Kahneman 1974)
-    # ref = awareness-weighted avg of known competitor prices
-    # anchor_effect = (ref - price) / max(ref, 1) × 0.3
+    # FORCE 2: REFERENCE PRICE ANCHORING — DELETED IN v2-MIDDLE §R1
+    #
+    # v1 double-counted: prospect value already shrinks when price is
+    # below reference, and this force independently rewarded the same
+    # thing. The effect is now absorbed into prospect loss via the
+    # REF_RATIO multiplier above (Tversky & Kahneman 1974 as a loss-side
+    # modifier, not an additive force — which is what the 1974 paper
+    # actually argued for).
+    #
+    # The field is kept in the `forces` dict for schema compatibility.
+    # It is always 0 for aware agents.
     # ═══════════════════════════════════════════════════════════════
-    # Per-agent reference price: modulated by their competitor awareness
-    # Innovators know more competitors → their ref reflects full market
-    # Laggards know fewer → their ref is skewed toward dominant player
-    # ref_price_a may be per-agent array or scalar
-    ref_has_value = np.any(ref_price_a > 0) if has_agent_params else ref_price_a > 0
-    if ref_has_value and price > 0:
-        # Scale reference price by competitor awareness
-        # Less aware agents anchor more to the dominant/cheapest option
-        agent_ref = ref_price_a * comp_frac_a + price * (1.0 - comp_frac_a)
-        anchor = (agent_ref - price) / np.maximum(agent_ref, 1.0) * ANCHORING_WEIGHT
-    else:
-        anchor = np.zeros(la_a.shape)
-
-    forces["anchoring"][aware_mask] = anchor
+    forces["anchoring"][aware_mask] = 0.0
 
     # ═══════════════════════════════════════════════════════════════
     # FORCE 3: STATUS QUO BIAS (Samuelson & Zeckhauser 1988)
@@ -270,13 +305,24 @@ def compute_forces(
 
     # ═══════════════════════════════════════════════════════════════
     # FORCE 4: SOCIAL PROOF (Cialdini 1984, Salganik 2006)
-    # social_proof_need × log(1 + adoption × visibility) × (1 - benefit_certainty)
+    # social_proof_need × log(1 + adoption × visibility) × (1 - w(certainty))
     # Matters MORE when benefit is uncertain.
+    #
+    # v2-middle Wave 1: `benefit_certainty` is treated as a subjective
+    # probability and passed through the Tversky-Kahneman (1992)
+    # weighting function w(p) = p^γ / (p^γ + (1-p)^γ)^(1/γ), γ=0.61.
+    # Small certainties are over-weighted; large certainties under-
+    # weighted. Wave 2 will apply the same weighting per-feature on the
+    # gain side once the feature matrix lands.
     # ═══════════════════════════════════════════════════════════════
+    weighted_certainty = probability_weight(
+        np.asarray(benefit_certainty_a, dtype=np.float64)
+    )
+    uncertainty_factor = 1.0 - weighted_certainty
     social = (
         spn_a
         * np.log1p(product_adoption * social_visibility_a)
-        * (1.0 - benefit_certainty_a)
+        * uncertainty_factor
     )
     forces["social_proof"][aware_mask] = social
 
@@ -302,12 +348,16 @@ def compute_forces(
     # ═══════════════════════════════════════════════════════════════
     # Per-agent beta: openness shifts beta toward 1.0 (less bias)
     # openness=0.5 → no shift; openness=1.0 → beta + 0.15; openness=0 → beta - 0.15
-    agent_beta = present_bias_beta + 0.3 * (open_a - 0.5)
-    agent_beta = np.clip(agent_beta, 0.1, 0.95)
+    # (Same computation as agent_beta_pre above; recomputed for clarity.)
+    agent_beta = np.clip(present_bias_beta + 0.3 * (open_a - 0.5), 0.1, 0.95)
 
     discount = -(
         time_to_value_a * (1.0 - agent_beta) * perceived_benefit_a * DISCOUNT_SCALE
     )
+    # v2-middle §R10: when the delayed-benefit rule fires, the discount
+    # was already applied multiplicatively to the gain side of prospect.
+    # Zero it here to prevent double-counting.
+    discount = np.where(delayed_benefit_mask, 0.0, discount)
     forces["hyperbolic_discounting"][aware_mask] = discount
 
     # ═══════════════════════════════════════════════════════════════
