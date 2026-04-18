@@ -17,6 +17,13 @@ from __future__ import annotations
 
 import numpy as np
 
+from mindsim.engine.feature_forces import (
+    compute_feature_gain,
+    compute_feature_loss,
+    compute_weighted_certainty,
+    compute_weighted_time_to_value_months,
+    compute_weighted_visibility,
+)
 from mindsim.engine.force_config import (
     BEHAVIOR_CHANGE_THRESHOLD,
     DELAYED_BENEFIT_THRESHOLD,
@@ -140,6 +147,37 @@ def compute_forces(
         social_visibility_a = social_visibility
         time_to_value_a = time_to_value
 
+    # v2-middle Wave 2: feature-matrix override.
+    # If A4 emitted a feature_matrix, compute per-agent gain/loss/TTV/visibility
+    # from the features weighted by each agent's category weights. The
+    # overridden values flow through the existing force formulas below, so
+    # this is a localised replacement not a restructure.
+    has_feature_matrix = bool(params.feature_matrix)
+    if has_feature_matrix:
+        aware_agents = agents[aware_mask]
+        gamma = params.probability_weighting_gamma
+        feature_gain_a = compute_feature_gain(
+            aware_agents, params.feature_matrix, gamma=gamma
+        )
+        feature_loss_a = compute_feature_loss(
+            aware_agents, params.feature_matrix, gamma=gamma
+        )
+        # Replace the stamped aggregate scalars with per-agent feature-derived
+        # values. All downstream formulas continue to use these variable names.
+        perceived_benefit_a = feature_gain_a
+        weighted_cert = compute_weighted_certainty(aware_agents, params.feature_matrix)
+        benefit_certainty_a = weighted_cert
+        weighted_vis = compute_weighted_visibility(aware_agents, params.feature_matrix)
+        social_visibility_a = weighted_vis
+        ttv_months = compute_weighted_time_to_value_months(
+            aware_agents, params.feature_matrix
+        )
+        # Normalise months → [0, 1] so the Wave 1 delayed-benefit threshold
+        # (0.30) continues to map to "roughly 3.6 months" as documented.
+        time_to_value_a = np.minimum(ttv_months / 12.0, 1.0)
+    else:
+        feature_loss_a = None  # no feature-side loss to add
+
     # ═══════════════════════════════════════════════════════════════
     # FORCE 1: PROSPECT VALUE (Kahneman & Tversky 1979/1992)
     #
@@ -239,6 +277,13 @@ def compute_forces(
         # Openness reduces effort aversion — open people don't mind
         # the hassle of trying new things
         v_loss *= (0.3 + 0.7 * (1.0 - open_a))
+
+    # v2-middle Wave 2: add feature-side loss (ongoing_cost features) to
+    # v_loss. These are non-monetary losses (like effort), so we scale
+    # them by 0.3 to match the free-product effort-loss convention and
+    # keep the overall loss magnitude in the same ballpark as v1.
+    if has_feature_matrix and feature_loss_a is not None:
+        v_loss = v_loss + la_a * np.power(np.maximum(feature_loss_a, 1e-6), BETA_PT) * 0.3
 
     # v2-middle §R10 / Gap 5: Loss × discount multiplicative rule.
     # For products with upfront cost AND delayed benefit, hyperbolic
