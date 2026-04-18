@@ -151,6 +151,12 @@ class SimulationParams(BaseModel):
     # using the scalar path.
     feature_matrix: list[Feature] = Field(default_factory=list)
 
+    # Raw competitor feature scores as emitted by A4. Keyed by competitor name.
+    # Wave 2 stores them here as placeholders; Wave 4 scrapers replace them
+    # with grounded values and populate CompetitorInfo.feature_scores on the
+    # actual competitor objects.
+    competitor_feature_scores: dict[str, dict[str, float]] = Field(default_factory=dict)
+
 
 class SimulationConfig(BaseModel):
     """Complete simulation config — output of the calibrate stage."""

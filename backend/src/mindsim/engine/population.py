@@ -10,13 +10,24 @@ Generates N agents as a structured NumPy array. Each agent has:
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from mindsim.engine.archetypes import ArchetypeSet, load_archetypes
+from mindsim.engine.feature_weights import (
+    FEATURE_CATEGORIES,
+    FeatureWeights,
+    load_feature_weights,
+)
 from mindsim.models.config import ARCHETYPE_NAMES, PopulationConfig, SimulationParams, resolve_archetype_value
+
+logger = logging.getLogger(__name__)
 
 
 # Structured dtype for agent arrays
+# v2-middle Wave 2 additions: feature_weight_* fields (one per category)
+# stamped from config/feature_weights.yaml with per-agent jitter.
 AGENT_DTYPE = np.dtype([
     ("archetype_id", np.int8),
     ("loss_aversion_lambda", np.float32),
@@ -39,6 +50,11 @@ AGENT_DTYPE = np.dtype([
     ("agent_reference_price", np.float32),
     ("agent_social_visibility", np.float32),
     ("agent_time_to_value", np.float32),
+    # v2-middle Wave 2: per-agent feature-category weights (sum to 1.0 per agent)
+    ("feature_weight_core_value", np.float32),
+    ("feature_weight_social_signal", np.float32),
+    ("feature_weight_ongoing_cost", np.float32),
+    ("feature_weight_switching_friction_reducer", np.float32),
 ])
 
 
@@ -175,11 +191,63 @@ def generate_population(
     if sim_params is not None:
         _stamp_product_params(agents, archetype_ids, archetype_names, sim_params, rng)
 
+    # --- v2-middle Wave 2: stamp per-agent feature_weights from YAML ---
+    _stamp_feature_weights(agents, archetype_ids, archetype_names, rng)
+
     # --- Awareness is set later by the simulation stage ---
     agents["aware"] = True  # default, overridden in simulate
     agents["competitor_awareness_frac"] = 0.5  # default
 
     return agents
+
+
+def _stamp_feature_weights(
+    agents: np.ndarray,
+    archetype_ids: np.ndarray,
+    archetype_names: list[str],
+    rng: np.random.Generator,
+) -> None:
+    """Stamp per-agent feature_weight_* fields from feature_weights.yaml.
+
+    Per archetype: draw the base weight vector, apply multiplicative
+    lognormal-ish jitter (sigma from YAML), renormalise so each agent's
+    weights sum to exactly 1.0.
+    """
+    try:
+        fw: FeatureWeights | None = load_feature_weights()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "feature_weights YAML unreadable (%s); using uniform 0.25 weights", exc
+        )
+        fw = None
+
+    sigma = fw.noise_sigma if fw is not None else 0.0
+
+    for i, aname in enumerate(archetype_names):
+        mask = archetype_ids == i
+        count = int(mask.sum())
+        if count == 0:
+            continue
+
+        if fw is not None:
+            base = fw.weights_for(aname)
+        else:
+            base = {c: 0.25 for c in FEATURE_CATEGORIES}
+
+        base_arr = np.array(
+            [base[c] for c in FEATURE_CATEGORIES], dtype=np.float64
+        )
+        # Per-agent multiplicative noise. Shape: (count, 4).
+        if sigma > 0.0:
+            noise = rng.normal(loc=1.0, scale=sigma, size=(count, len(FEATURE_CATEGORIES)))
+        else:
+            noise = np.ones((count, len(FEATURE_CATEGORIES)), dtype=np.float64)
+        jittered = np.clip(base_arr[None, :] * noise, 1e-9, None)
+        jittered /= jittered.sum(axis=1, keepdims=True)
+
+        for j, cat in enumerate(FEATURE_CATEGORIES):
+            field = f"feature_weight_{cat}"
+            agents[field][mask] = jittered[:, j].astype(np.float32)
 
 
 # Map from SimulationParams field name to AGENT_DTYPE field name

@@ -115,78 +115,105 @@ research results, assign ALL numerical parameters needed for a behavioral econom
 BEHAVIORAL SCIENCE DEFAULTS (use as anchors, adjust based on evidence):
 - loss_aversion λ = 2.25 (Kahneman & Tversky 1992) — population mean, per-agent variation handled by engine
 - present_bias β = 0.5 for behavior-change products, 0.85 for consumption (Augenblick 2015)
-- status_quo switching cost: 0.3 for easy-switch, 0.7 for locked-in ecosystems
 - social_visibility: 0.2 for private tools, 0.7 for visible/social products
 
-EVERY parameter must have:
-- value: the number (0-1 scale for most, dollar amount for price/reference_price)
-- basis: WHY this number (cite evidence, comparison, or reasoning)
-- confidence: HOW SURE you are (0-1)
+v2-middle CRITICAL CHANGE: products are feature vectors, not scalars
+──────────────────────────────────────────────────────────────────────
+You MUST emit a `feature_matrix` array with between 4 and 8 Feature objects. Each feature \
+is a distinct product dimension that buyers evaluate independently.
+
+Example for an AI coding assistant:
+  [
+    {"name": "code_quality",         "polarity": "positive", "category": "core_value",
+     "score": 0.85, "certainty": 0.70, "visibility": 0.30, "time_to_value_months": 0.5, "basis": "…"},
+    {"name": "credit_economics",     "polarity": "negative", "category": "ongoing_cost",
+     "score": 0.40, "certainty": 0.95, "visibility": 0.10, "time_to_value_months": 0.0, "basis": "…"},
+    {"name": "ide_integrations",     "polarity": "positive", "category": "switching_friction_reducer",
+     "score": 0.60, "certainty": 0.80, "visibility": 0.20, "time_to_value_months": 0.0, "basis": "…"},
+    {"name": "dev_identity_signal",  "polarity": "positive", "category": "social_signal",
+     "score": 0.35, "certainty": 0.50, "visibility": 0.60, "time_to_value_months": 2.0, "basis": "…"}
+  ]
+
+FEATURE FIELDS (all required):
+  - name:                 snake_case identifier, short
+  - polarity:             "positive" (adds to gain) | "negative" (adds to loss, goes through λ)
+  - category:             one of
+        "core_value"                  — what the product does (functional utility)
+        "social_signal"               — identity, visibility, prestige
+        "ongoing_cost"                — recurring friction: cognitive load, maintenance, attention tax
+        "switching_friction_reducer"  — reduces switching cost TO this product (integrations, migrations)
+  - score:                0-1, how strong the product is on this dimension
+  - certainty:            0-1, subjective P(feature delivers its score)
+  - visibility:           0-1, can others observe the agent using this feature
+  - time_to_value_months: float ≥ 0, months until value is realised (0 = immediate)
+  - basis:                short prose explaining where the number comes from
+
+COMPETITOR FEATURE SCORES:
+For each verified competitor, emit 0-1 scores on the SAME feature names you chose above. \
+Placeholder estimates are OK — Wave 4 replaces them with scraped data.
+
+──────────────────────────────────────────────────────────────────────
+
+EVERY non-feature parameter must still have:
+- value, basis, confidence (0-1)
 
 OPTIONAL per-archetype overrides (by_archetype):
-Some parameters are perceived differently by different adopter segments (Rogers 1962). \
-When a parameter clearly varies by archetype, add a "by_archetype" dict with keys from: \
-"innovator", "early_adopter", "early_majority", "late_majority", "laggard".
+Some non-feature parameters vary by archetype (Rogers 1962). Include by_archetype with keys \
+from {"innovator","early_adopter","early_majority","late_majority","laggard"} when warranted:
+- reference_price: segments anchor to different competitors (power users → premium tools; casual → free tier)
+- identity_signal: some segments signal more loudly than others
 
-You don't need all 5 — missing archetypes use the base "value". Only include by_archetype \
-when there's a clear product-specific reason:
-- perceived_benefit: innovators may value novel/technical products more; laggards may not understand the value
-- switching_cost: innovators actively seek new tools (low); laggards have deep habits (high)
-- benefit_certainty: early adopters tolerate uncertainty; late majority needs proof
-- reference_price: different segments anchor to different competitors (power users anchor to premium tools, casual users anchor to free)
-- social_visibility: may vary if the product is used differently by segment
-- time_to_value: experienced users may see value faster
+Reference price should be computed from competitor prices. Include components with weights.
 
-Reference price should be computed from competitor prices. Include components:
-- Each major competitor/alternative with its weight in forming the reference
-
-Return ONLY this JSON structure:
+Return ONLY this JSON structure (no markdown, no commentary):
 
 {
   "price": number,
   "reference_price": {
     "value": number,
-    "components": [
-      {"source": "name", "price": number, "weight": number}
-    ],
+    "components": [{"source": "name", "price": number, "weight": number}],
     "confidence": number,
-    "basis": "explanation",
+    "basis": "string",
     "by_archetype": {"innovator": number, "laggard": number}
   },
-  "category_penetration": {"value": number, "basis": "string", "confidence": number},
-  "benefit_certainty": {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
-  "perceived_benefit": {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
-  "time_to_value": {"value": number, "basis": "string", "confidence": number},
-  "requires_behavior_change": {"value": number, "basis": "string", "confidence": number},
-  "switching_cost": {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
-  "social_visibility": {"value": number, "basis": "string", "confidence": number},
-  "identity_signal": {"value": number, "basis": "string", "confidence": number},
-  "present_bias_beta": {"value": number, "basis": "string", "confidence": number},
-  "fomo_intensity": {"value": number, "basis": "string", "confidence": number},
-  "category_growth": {"value": number, "basis": "string", "confidence": number},
-  "product_adoption_rate": {"value": number, "basis": "string", "confidence": number},
+  "feature_matrix": [
+    {
+      "name": "snake_case",
+      "polarity": "positive|negative",
+      "category": "core_value|social_signal|ongoing_cost|switching_friction_reducer",
+      "score": number,
+      "certainty": number,
+      "visibility": number,
+      "time_to_value_months": number,
+      "basis": "string"
+    }
+    /* 4 to 8 features total */
+  ],
+  "competitor_feature_scores": {
+    "Competitor A": {"feature_name_1": number, "feature_name_2": number},
+    "Competitor B": {"feature_name_1": number, "feature_name_2": number}
+  },
+  "category_penetration":      {"value": number, "basis": "string", "confidence": number},
+  "category_growth":           {"value": number, "basis": "string", "confidence": number},
+  "requires_behavior_change":  {"value": number, "basis": "string", "confidence": number},
+  "identity_signal":           {"value": number, "basis": "string", "confidence": number, "by_archetype": {"innovator": number, ...}},
+  "present_bias_beta":         {"value": number, "basis": "string", "confidence": number},
+  "fomo_intensity":            {"value": number, "basis": "string", "confidence": number},
+  "product_adoption_rate":     {"value": number, "basis": "string", "confidence": number},
   "awareness_by_archetype": {
-    "innovator": number,
-    "early_adopter": number,
-    "early_majority": number,
-    "late_majority": number,
-    "laggard": number
+    "innovator": number, "early_adopter": number, "early_majority": number,
+    "late_majority": number, "laggard": number
   },
   "population_config": {
-    "income_mean_log": number,
-    "income_sigma": number,
-    "market_segment": "string"
+    "income_mean_log": number, "income_sigma": number, "market_segment": "string"
   },
   "assumptions": [
-    {
-      "parameter": "name",
-      "value": number,
-      "basis": "why",
-      "confidence": number,
-      "sensitivity": "high|medium|low"
-    }
+    {"parameter": "name", "value": number, "basis": "why", "confidence": number, "sensitivity": "high|medium|low"}
   ]
 }
+
+Do NOT emit these fields — they are DERIVED from feature_matrix:
+  perceived_benefit, benefit_certainty, switching_cost, social_visibility, time_to_value
 """
 
 # ═══════════════════════════════════════════════════════════════════════
