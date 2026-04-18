@@ -144,6 +144,9 @@ class SimulationParams(BaseModel):
     consideration_threshold: float = 0.45  # set by maturity in Wave 5; consumed in Wave 3
     probability_weighting_gamma: float = 0.61  # Tversky & Kahneman 1992
 
+    # v2-middle Wave 3: multi-round simulation rounds.
+    n_rounds: int = 8
+
     # v2-middle Wave 2: product as feature vectors.
     # Populated by A4 (calibrate stage). When present, the feature-matrix
     # path in engine/feature_forces.py replaces the scalar prospect math.

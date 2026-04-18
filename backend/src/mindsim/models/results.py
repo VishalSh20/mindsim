@@ -97,6 +97,10 @@ class SimulationResult(BaseModel):
     # Event results
     event_results: list[EventResult] = Field(default_factory=list)
 
+    # v2-middle Wave 3: per-round snapshots from the multi-round loop.
+    # Empty when simulate() ran with n_rounds=1 (legacy single-shot path).
+    rounds: list["RoundSnapshot"] = Field(default_factory=list)
+
     # Raw data for deep dives (not serialized by default)
     _agent_forces: dict | None = None
     _agent_probs: object = None

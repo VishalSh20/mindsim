@@ -211,17 +211,79 @@ def generate_population(
 
     # --- v2-middle Wave 3: initial state ---
     # Everyone starts UNAWARE. apply_awareness() promotes a subset to AWARE
-    # and sets awareness_strength. Multi-round simulate (Commit 2) advances
-    # agents through the rest of the phases.
+    # and sets awareness_strength. Multi-round simulate advances agents
+    # through the rest of the phases.
     agents["phase"] = int(Phase.UNAWARE)
     agents["awareness_strength"] = 0.0
-    agents["tenure_current_solution"] = 0.0   # filled more richly in Commit 2
     agents["investment_depth"] = 0.0
     agents["trial_outcome"] = -1
     agents["trial_rounds_remaining"] = 0
     agents["cluster_id"] = 0                   # single cluster until Wave 4
 
+    # Tenure: draw per-archetype based on category_penetration. Agents who
+    # already use a tool in this category have a tenure duration; others
+    # have tenure=0. Fixes Gap 8 — situational SQB reflects how long the
+    # agent has been committed to an incumbent.
+    if sim_params is not None:
+        _stamp_initial_tenure(
+            agents, archetype_ids, archetype_names, sim_params, rng
+        )
+    else:
+        agents["tenure_current_solution"] = 0.0
+
     return agents
+
+
+# Archetype → (base tenure in months, std multiplier). Innovators switch
+# often; laggards hold on forever. Numbers are modelling decisions — kept
+# here rather than in a YAML so they live next to the math they feed.
+_ARCHETYPE_TENURE_BASE = {
+    "innovator":      1.0,
+    "early_adopter":  4.0,
+    "early_majority": 10.0,
+    "late_majority":  20.0,
+    "laggard":        36.0,
+}
+
+
+def _stamp_initial_tenure(
+    agents: np.ndarray,
+    archetype_ids: np.ndarray,
+    archetype_names: list[str],
+    sim_params: SimulationParams,
+    rng: np.random.Generator,
+) -> None:
+    """Stamp tenure_current_solution per archetype + category_penetration.
+
+    P(has a current solution) scales with category_penetration (with a
+    small archetype tilt — laggards are more likely to have stuck with
+    one thing if they're in-category at all). Those who have a current
+    solution get tenure_base[archetype] with ±30% noise; those who
+    don't get 0.0.
+    """
+    penetration = float(sim_params.category_penetration.value)
+    for i, aname in enumerate(archetype_names):
+        mask = archetype_ids == i
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        # Archetype tilt: laggards 1.3× likely; innovators 0.7×.
+        tilt = {
+            "innovator": 0.7,
+            "early_adopter": 0.85,
+            "early_majority": 1.0,
+            "late_majority": 1.15,
+            "laggard": 1.3,
+        }.get(aname, 1.0)
+        p_has_solution = np.clip(penetration * tilt, 0.0, 1.0)
+        has_solution = rng.random(count) < p_has_solution
+
+        base = _ARCHETYPE_TENURE_BASE.get(aname, 6.0)
+        tenure = rng.normal(base, base * 0.30, size=count)
+        tenure = np.maximum(tenure, 0.0).astype(np.float32)
+        tenure[~has_solution] = 0.0
+
+        agents["tenure_current_solution"][mask] = tenure
 
 
 def _stamp_feature_weights(

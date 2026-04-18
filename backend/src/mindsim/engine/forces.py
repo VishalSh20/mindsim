@@ -345,7 +345,25 @@ def compute_forces(
         + category_penetration * switching_friction
     )
 
-    status_quo = -(sqb_a * blended_friction)
+    # v2-middle Wave 3 / Gap 8: situational SQB. The v1 status_quo force
+    # was purely dispositional — a laggard always had sqb=0.85 even if
+    # they had never used any tool in this category. Now we modulate the
+    # personality-driven sqb by `tenure_current_solution`:
+    #
+    #   tenure = 0 (no incumbent) → sqb effectively halved
+    #   tenure = 12 months        → sqb at full personality value
+    #   tenure = 24+ months       → sqb amplified by up to 1.25×
+    #
+    # Laggards fresh to a category now have a lower barrier than laggards
+    # who've been using Excel for twenty years — which is what the
+    # literature actually says (Samuelson & Zeckhauser 1988; Gal 2006).
+    tenure_a = agents["tenure_current_solution"][aware_mask].astype(np.float64)
+    # Map tenure months → [0.5, 1.25] multiplier. Cap at 18 months so
+    # deep-incumbent agents don't run away.
+    tenure_factor = 0.5 + 0.5 * np.clip(tenure_a / 12.0, 0.0, 1.5)
+    sqb_effective = sqb_a * tenure_factor
+
+    status_quo = -(sqb_effective * blended_friction)
     forces["status_quo"][aware_mask] = status_quo
 
     # ═══════════════════════════════════════════════════════════════

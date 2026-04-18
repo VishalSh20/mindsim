@@ -1,7 +1,21 @@
 """Stage 4: SIMULATE — orchestrate the simulation engine.
 
-Generates population → awareness filter → compute forces → decisions → segment.
-Pure math, 0 LLM calls, <100ms for 1000 agents.
+v2-middle Wave 3: multi-round simulation.
+
+Per MECHANICS-v2 §"The Key Insight": no round is special. The same
+force computation + state transitions run every round. The S-curve,
+the chasm, and the adoption cascade all emerge from the mechanics
+rather than being hardcoded.
+
+Each round:
+  1. decay awareness (UNAWARE drifters + AWARE decay)
+  2. promote UNAWARE → AWARE (marketing + word-of-mouth reach)
+  3. promote AWARE → CONSIDERING (strength threshold + relevance gate)
+  4. compute forces (only DECISION_PHASES agents)
+  5. draw CONSIDERING → ADOPTED via logistic
+  6. advance ADOPTED → LOCKED_IN or CHURNED
+
+Still pure NumPy, still <1s for N=8 rounds × 1000 agents.
 """
 
 from __future__ import annotations
@@ -13,16 +27,31 @@ import numpy as np
 from mindsim.engine.archetypes import ArchetypeSet, load_archetypes
 from mindsim.engine.forces import compute_decisions, compute_forces, compute_weighted_forces
 from mindsim.engine.population import AGENT_DTYPE, apply_awareness, generate_population
+from mindsim.engine.state_machine import (
+    advance_adopted,
+    decay_awareness,
+    decide_considering_to_adopted,
+    phase_counts,
+    promote_aware_to_considering,
+    promote_unaware_to_aware,
+    sync_aware_flag,
+    total_adoption_count,
+)
 from mindsim.models.config import SimulationConfig
 from mindsim.models.results import (
     ArchetypeSegment,
     ForceDecomposition,
     IncomeSegment,
     ProximitySegment,
+    RoundSnapshot,
     SimulationResult,
 )
+from mindsim.models.state import ADOPTED_PHASES, Phase
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_N_ROUNDS = 8
 
 
 def simulate(
@@ -30,17 +59,22 @@ def simulate(
     n_agents: int = 1000,
     rng: np.random.Generator | None = None,
     archetype_set: ArchetypeSet | None = None,
+    n_rounds: int | None = None,
 ) -> SimulationResult:
-    """Run the full simulation pipeline.
+    """Run the full simulation.
 
     Args:
         config: SimulationConfig from the calibrate stage.
         n_agents: Number of agents to simulate.
         rng: Random number generator for reproducibility.
         archetype_set: Archetype definitions. Loads from YAML if None.
+        n_rounds: How many rounds to simulate. `None` uses config's
+            `simulation_params.n_rounds` (default 8). Pass 1 for the
+            old v1 single-shot semantics.
 
     Returns:
-        SimulationResult with adoption rates, force decomposition, segments.
+        SimulationResult with per-round snapshots, adoption rates,
+        force decomposition, and segments.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -49,9 +83,12 @@ def simulate(
 
     params = config.simulation_params
     archetype_names = archetype_set.names
+    if n_rounds is None:
+        n_rounds = int(getattr(params, "n_rounds", DEFAULT_N_ROUNDS) or DEFAULT_N_ROUNDS)
+    n_rounds = max(1, n_rounds)
 
     # 4a. GENERATE POPULATION
-    logger.info(f"Generating {n_agents} agents...")
+    logger.info("Generating %d agents…", n_agents)
     agents = generate_population(
         n=n_agents,
         population_config=config.population_config,
@@ -60,7 +97,7 @@ def simulate(
         rng=rng,
     )
 
-    # 4b. AWARENESS FILTER
+    # 4b. INITIAL AWARENESS
     awareness_dict = {
         "innovator": params.awareness.innovator,
         "early_adopter": params.awareness.early_adopter,
@@ -72,22 +109,72 @@ def simulate(
         agents, awareness_dict, archetype_names,
         rng=rng, archetype_set=archetype_set,
     )
+    sync_aware_flag(agents)
 
-    n_aware = int(agents["aware"].sum())
-    logger.info(f"Aware agents: {n_aware}/{n_agents} ({n_aware/n_agents*100:.1f}%)")
+    # 4c. MULTI-ROUND LOOP
+    rounds_log: list[RoundSnapshot] = []
+    final_forces: dict[str, np.ndarray] | None = None
+    final_adopt_prob: np.ndarray | None = None
 
-    # 4c. COMPUTE FORCES
-    forces = compute_forces(agents, params)
+    for round_idx in range(1, n_rounds + 1):
+        # ── awareness update ──
+        decay_awareness(agents)
+        promote_unaware_to_aware(
+            agents,
+            product_adoption_rate=float(params.product_adoption_rate.value),
+            rng=rng,
+        )
+        promote_aware_to_considering(agents, params, rng=rng)
 
-    # 4d. DECISIONS + SEGMENTATION
-    adopt_prob, decisions = compute_decisions(forces, temperature=3.0, rng=rng)
+        sync_aware_flag(agents)
 
-    # Overall adoption
-    total_adoption = float(decisions.sum() / n_agents) if n_agents > 0 else 0.0
-    aware_adoption = float(decisions[agents["aware"]].sum() / max(n_aware, 1))
+        # ── force computation + decision draw ──
+        forces = compute_forces(agents, params)
+        adopt_prob, _ = compute_decisions(forces, temperature=3.0, rng=rng)
 
-    # Boundary-weighted force decomposition
-    weighted = compute_weighted_forces(forces, adopt_prob)
+        decide_considering_to_adopted(agents, adopt_prob, rng=rng)
+        n_locked, n_churned = advance_adopted(agents, rng=rng)
+        sync_aware_flag(agents)
+
+        # ── snapshot ──
+        sync_aware_flag(agents)
+        total_adopt = total_adoption_count(agents)
+        snapshot = RoundSnapshot(
+            round=round_idx,
+            phase_counts=phase_counts(agents),
+            cluster_adoption={},       # populated in Wave 4
+            total_adoption=total_adopt / max(n_agents, 1),
+            aware_count=int(agents["aware"].sum()),
+        )
+        rounds_log.append(snapshot)
+        logger.debug(
+            "round %d: adopted=%d locked_in=%d churned=%d (+%d locked, +%d churned)",
+            round_idx,
+            int((agents["phase"] == int(Phase.ADOPTED)).sum()),
+            int((agents["phase"] == int(Phase.LOCKED_IN)).sum()),
+            int((agents["phase"] == int(Phase.CHURNED)).sum()),
+            n_locked,
+            n_churned,
+        )
+
+        final_forces = forces
+        final_adopt_prob = adopt_prob
+
+    # 4d. POST-SIMULATION SUMMARY
+    assert final_forces is not None and final_adopt_prob is not None
+
+    phase_arr = agents["phase"]
+    decisions = np.isin(phase_arr, np.array(ADOPTED_PHASES, dtype=phase_arr.dtype))
+    n_decided = int(decisions.sum())
+
+    total_adoption = float(n_decided / n_agents) if n_agents > 0 else 0.0
+    aware_like = agents["aware"] | decisions
+    n_aware_like = int(aware_like.sum())
+    aware_adoption = float(
+        decisions[aware_like].sum() / max(n_aware_like, 1)
+    ) if n_aware_like > 0 else 0.0
+
+    weighted = compute_weighted_forces(final_forces, final_adopt_prob)
     force_decomposition = ForceDecomposition(
         prospect_value=weighted.get("prospect_value", 0.0),
         anchoring=weighted.get("anchoring", 0.0),
@@ -98,7 +185,6 @@ def simulate(
         identity_signaling=weighted.get("identity_signaling", 0.0),
     )
 
-    # Segment by archetype
     by_archetype = []
     for i, aname in enumerate(archetype_names):
         mask = agents["archetype_id"] == i
@@ -116,34 +202,32 @@ def simulate(
             total=total,
         ))
 
-    # Segment by income (terciles)
     by_income = _segment_by_income(agents, decisions)
-
-    # Segment by proximity
-    by_proximity = _segment_by_proximity(adopt_prob, agents["aware"])
+    by_proximity = _segment_by_proximity(final_adopt_prob, agents["aware"])
 
     result = SimulationResult(
         total_adoption=total_adoption,
         aware_adoption=aware_adoption,
         n_agents=n_agents,
-        n_aware=n_aware,
+        n_aware=n_aware_like,
         force_decomposition=force_decomposition,
         by_archetype=by_archetype,
         by_income=by_income,
         by_proximity=by_proximity,
+        rounds=rounds_log,
     )
 
-    # Store raw data for interactive deep dives
-    result._agent_forces = forces
-    result._agent_probs = adopt_prob
+    result._agent_forces = final_forces
+    result._agent_probs = final_adopt_prob
     result._agent_decisions = decisions
     result._agents = agents
 
     logger.info(
-        f"Simulation complete: {total_adoption*100:.1f}% total adoption, "
-        f"{aware_adoption*100:.1f}% aware adoption"
+        "Simulation complete (%d rounds): %.1f%% total, %.1f%% of aware",
+        n_rounds,
+        total_adoption * 100,
+        aware_adoption * 100,
     )
-
     return result
 
 
@@ -176,7 +260,6 @@ def _segment_by_income(
             count=adopted,
             total=total,
         ))
-
     return segments
 
 
@@ -194,11 +277,9 @@ def _segment_by_proximity(
         return ProximitySegment(locked=0, convertible=0, unreachable=1.0)
 
     aware_probs = adopt_prob[aware_mask]
-
     locked = float((aware_probs > 0.7).sum() / aware)
     convertible = float(((aware_probs >= 0.3) & (aware_probs <= 0.7)).sum() / aware)
     unreachable = float((aware_probs < 0.3).sum() / aware)
-
     return ProximitySegment(
         locked=locked,
         convertible=convertible,
