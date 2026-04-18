@@ -3,7 +3,47 @@
 No numerical simulation parameters. Only what the user stated + gaps.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+# v2-middle Wave 2: the four feature categories.
+# `polarity` is a free field per feature so an LLM can plausibly mark a
+# `core_value` score as negative for a genuinely weak core-value dimension
+# (cf. "competitor is better on X"). Category determines which agent
+# weight applies; polarity routes the feature to gain or loss side.
+FeatureCategory = Literal[
+    "core_value",
+    "social_signal",
+    "ongoing_cost",
+    "switching_friction_reducer",
+]
+
+
+class Feature(BaseModel):
+    """A single product feature in the feature matrix.
+
+    Populated by A4. Semantics:
+      - score          : 0-1, how strong the product is on this dimension
+      - polarity       : positive → adds to gain; negative → adds to loss
+      - category       : which archetype weight applies
+      - certainty      : subjective P(feature delivers its stated score);
+                         passed through T&K probability weighting w(p)
+      - visibility     : 0-1, can others see the agent using this feature
+      - time_to_value_months : continuous; drives hyperbolic discounting
+      - evidence_refs  : list of quote_ids (populated by A2/A3 in Wave 4)
+    """
+
+    name: str
+    score: float
+    polarity: Literal["positive", "negative"]
+    category: FeatureCategory
+    certainty: float = 0.5
+    visibility: float = 0.3
+    time_to_value_months: float = 0.0
+    basis: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
 
 
 class CompetitorInfo(BaseModel):
@@ -15,6 +55,11 @@ class CompetitorInfo(BaseModel):
     has_free_tier: bool = False
     market_position: str | None = None  # "dominant", "challenger", "niche"
     source_url: str | None = None
+
+    # v2-middle Wave 2: per-competitor scores on the same feature names
+    # used by this product. Filled as placeholders by A4 in Wave 2;
+    # replaced with scraped values by A2 in Wave 4.
+    feature_scores: dict[str, float] = Field(default_factory=dict)
 
 
 class ResearchQuery(BaseModel):

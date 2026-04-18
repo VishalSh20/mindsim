@@ -1,0 +1,52 @@
+# Archetype × feature-category weight matrix.
+#
+# Rows sum to 1.0 per archetype (strict — checked at load time).
+# Populates `AGENT_DTYPE.feature_weight_*` per agent with ±5% noise
+# so agents of the same archetype aren't carbon copies.
+#
+# Rationale: Rogers (1962) archetypes differ not just on loss aversion
+# but on which product dimensions they actually care about. Innovators
+# weight capability and novelty; laggards weight cost-avoidance.
+#
+# Categories:
+#   - core_value              (positive polarity — what the product does)
+#   - social_signal           (positive — identity/visibility)
+#   - ongoing_cost            (negative — recurring friction, cognitive tax)
+#   - switching_friction_reducer (positive — integrations/migrations)
+
+archetypes:
+  innovator:
+    core_value: 0.50
+    social_signal: 0.35
+    ongoing_cost: 0.10
+    switching_friction_reducer: 0.05
+
+  early_adopter:
+    core_value: 0.45
+    social_signal: 0.25
+    ongoing_cost: 0.20
+    switching_friction_reducer: 0.10
+
+  early_majority:
+    core_value: 0.40
+    social_signal: 0.15
+    ongoing_cost: 0.35
+    switching_friction_reducer: 0.10
+
+  late_majority:
+    core_value: 0.30
+    social_signal: 0.10
+    ongoing_cost: 0.45
+    switching_friction_reducer: 0.15
+
+  laggard:
+    core_value: 0.20
+    social_signal: 0.05
+    ongoing_cost: 0.55
+    switching_friction_reducer: 0.20
+
+# Per-agent jitter applied to the base weights at population-gen time.
+# Normally-distributed multiplicative noise; weights renormalised to 1.0
+# after jitter.
+noise:
+  sigma: 0.05
