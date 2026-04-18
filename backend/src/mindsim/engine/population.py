@@ -21,6 +21,7 @@ from mindsim.engine.feature_weights import (
     load_feature_weights,
 )
 from mindsim.models.config import ARCHETYPE_NAMES, PopulationConfig, SimulationParams, resolve_archetype_value
+from mindsim.models.state import Phase
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,16 @@ AGENT_DTYPE = np.dtype([
     ("feature_weight_social_signal", np.float32),
     ("feature_weight_ongoing_cost", np.float32),
     ("feature_weight_switching_friction_reducer", np.float32),
+    # v2-middle Wave 3: agent state + memory.
+    # `phase` is the authoritative state (Phase enum int8). `aware` above
+    # mirrors `phase != UNAWARE` for back-compat with force-slicing code.
+    ("phase", np.int8),
+    ("awareness_strength", np.float32),   # 0-1, graded; decays per round
+    ("tenure_current_solution", np.float32),  # months with incumbent
+    ("investment_depth", np.float32),      # 0-1, grows while ADOPTED
+    ("trial_outcome", np.int8),            # -1 none, 0 negative, 1 positive
+    ("trial_rounds_remaining", np.int8),   # 0 when not TRIALING
+    ("cluster_id", np.uint8),              # placeholder — W4 fills it
 ])
 
 
@@ -197,6 +208,18 @@ def generate_population(
     # --- Awareness is set later by the simulation stage ---
     agents["aware"] = True  # default, overridden in simulate
     agents["competitor_awareness_frac"] = 0.5  # default
+
+    # --- v2-middle Wave 3: initial state ---
+    # Everyone starts UNAWARE. apply_awareness() promotes a subset to AWARE
+    # and sets awareness_strength. Multi-round simulate (Commit 2) advances
+    # agents through the rest of the phases.
+    agents["phase"] = int(Phase.UNAWARE)
+    agents["awareness_strength"] = 0.0
+    agents["tenure_current_solution"] = 0.0   # filled more richly in Commit 2
+    agents["investment_depth"] = 0.0
+    agents["trial_outcome"] = -1
+    agents["trial_rounds_remaining"] = 0
+    agents["cluster_id"] = 0                   # single cluster until Wave 4
 
     return agents
 
@@ -378,6 +401,19 @@ def apply_awareness(
         # Product awareness
         aware_mask = rng.random(count) < awareness_probs[i]
         agents["aware"][mask] = aware_mask
+
+        # v2-middle Wave 3: promote UNAWARE → AWARE for this subset, and
+        # seed awareness_strength. Newly-aware agents get a moderate strength
+        # (0.5) meaning "I know about this but haven't engaged yet"; the
+        # Wave 3 Commit 2 state machine then decides whether they cross the
+        # consideration threshold. Vectorised via global-index slicing.
+        archetype_indices = np.flatnonzero(mask)
+        becomes_aware_idx = archetype_indices[aware_mask]
+        stays_unaware_idx = archetype_indices[~aware_mask]
+        agents["phase"][becomes_aware_idx] = int(Phase.AWARE)
+        agents["phase"][stays_unaware_idx] = int(Phase.UNAWARE)
+        agents["awareness_strength"][becomes_aware_idx] = 0.5
+        agents["awareness_strength"][stays_unaware_idx] = 0.0
 
         # Competitor awareness fraction
         comp_frac = archetype_set.archetypes[aname].awareness.competitor_fraction
