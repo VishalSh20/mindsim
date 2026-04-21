@@ -28,6 +28,7 @@ import logging
 
 import numpy as np
 
+from mindsim.engine.clusters import cluster_visibility_array
 from mindsim.engine.feature_forces import compute_feature_gain
 from mindsim.engine.probability_weighting import probability_weight
 from mindsim.models.config import SimulationParams
@@ -103,14 +104,23 @@ def promote_unaware_to_aware(
     rng: np.random.Generator,
     marketing_reach: float = MARKETING_REACH_PER_ROUND,
     wom_multiplier: float = WOM_MULTIPLIER,
+    cluster_rates: np.ndarray | None = None,
 ) -> int:
     """Promote a subset of UNAWARE agents to AWARE.
 
-    P(aware this round) = 1 - (1 - marketing_reach)
-                            × (1 - product_adoption_rate × wom_multiplier)
+    Wave 4: when `cluster_rates` is provided, the WOM term is per-agent:
 
-    No cluster-local WOM in Wave 3 — we use the global product_adoption_rate
-    as a proxy. Wave 4 replaces this with cluster-local rates.
+        p_aware_i = 1 - (1 - marketing_reach)
+                      × (1 - cluster_rates[cid_i] * cluster_vis[cid_i]
+                             * wom_multiplier)
+
+    Each UNAWARE agent's P(aware) depends on adoption inside their
+    cluster, weighted by that cluster's visibility factor. Agents in
+    cold clusters stay unaware longer; agents in hot clusters get pulled
+    in fast.
+
+    Fallback (`cluster_rates=None`) preserves the Wave 3 global-scalar
+    formula for backward compatibility and any direct-call sites.
 
     Returns the count of agents newly promoted.
     """
@@ -120,10 +130,25 @@ def promote_unaware_to_aware(
     if n_unaware == 0:
         return 0
 
-    p_aware = 1.0 - (1.0 - marketing_reach) * (1.0 - product_adoption_rate * wom_multiplier)
-    p_aware = float(np.clip(p_aware, 0.0, 1.0))
-    draws = rng.random(n_unaware)
-    promoted_local = draws < p_aware
+    if cluster_rates is not None:
+        cluster_vis = cluster_visibility_array()
+        unaware_cid = agents["cluster_id"][unaware].astype(np.int64)
+        wom_term = (
+            cluster_rates[unaware_cid]
+            * cluster_vis[unaware_cid]
+            * wom_multiplier
+        )
+        p_aware = 1.0 - (1.0 - marketing_reach) * (1.0 - wom_term)
+        p_aware = np.clip(p_aware, 0.0, 1.0)
+        draws = rng.random(n_unaware)
+        promoted_local = draws < p_aware
+    else:
+        p_aware = 1.0 - (1.0 - marketing_reach) * (
+            1.0 - product_adoption_rate * wom_multiplier
+        )
+        p_aware = float(np.clip(p_aware, 0.0, 1.0))
+        draws = rng.random(n_unaware)
+        promoted_local = draws < p_aware
 
     # Map back to global indices.
     global_idx = np.flatnonzero(unaware)

@@ -15,6 +15,7 @@ import logging
 import numpy as np
 
 from mindsim.engine.archetypes import ArchetypeSet, load_archetypes
+from mindsim.engine.clusters import assign_clusters
 from mindsim.engine.feature_weights import (
     FEATURE_CATEGORIES,
     FeatureWeights,
@@ -218,7 +219,10 @@ def generate_population(
     agents["investment_depth"] = 0.0
     agents["trial_outcome"] = -1
     agents["trial_rounds_remaining"] = 0
-    agents["cluster_id"] = 0                   # single cluster until Wave 4
+
+    # v2-middle Wave 4: cluster assignment. 6 clusters = archetype-tier x
+    # income-tier. Deterministic fallback until Wave 5 scrapers land.
+    agents["cluster_id"] = assign_clusters(archetype_ids, agents["income"])
 
     # Tenure: draw per-archetype based on category_penetration. Agents who
     # already use a tool in this category have a tenure duration; others

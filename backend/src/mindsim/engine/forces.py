@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from mindsim.engine.clusters import (
+    N_CLUSTERS,
+    cluster_visibility_array,
+)
 from mindsim.engine.feature_forces import (
     compute_feature_gain,
     compute_feature_loss,
@@ -48,12 +52,20 @@ DISCOUNT_SCALE = 0.3  # hyperbolic discounting scaling
 def compute_forces(
     agents: np.ndarray,
     params: SimulationParams,
+    cluster_rates: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Compute all 7 behavioral forces for every agent.
 
     Args:
         agents: Structured array with AGENT_DTYPE fields.
         params: Calibrated simulation parameters.
+        cluster_rates: Optional length-N_CLUSTERS array of per-cluster
+            adoption fractions (Wave 4). When provided, the social-proof
+            force and WOM awareness promotion use the agent's cluster
+            rate instead of the global `product_adoption_rate` scalar.
+            Fallback (None) preserves the pre-Wave-4 scalar formula so
+            sensitivity / intervention re-runs that call into forces
+            directly keep working unchanged.
 
     Returns:
         Dict mapping force name to array of shape (n_agents,).
@@ -382,11 +394,32 @@ def compute_forces(
         np.asarray(benefit_certainty_a, dtype=np.float64)
     )
     uncertainty_factor = 1.0 - weighted_certainty
-    social = (
-        spn_a
-        * np.log1p(product_adoption * social_visibility_a)
-        * uncertainty_factor
-    )
+    # v2-middle Wave 4: cluster-local social proof. When cluster_rates is
+    # given, each agent's social-proof term scales with adoption INSIDE
+    # their cluster (weighted by the cluster's visibility factor) rather
+    # than the global scalar. This produces Slack-style critical-mass
+    # dynamics: a cluster below its tipping point stays cold even if
+    # another cluster is red-hot. Fallback (no cluster_rates) preserves
+    # the Wave 3 global-scalar formula for direct-call sites (sensitivity,
+    # intervention re-runs).
+    if cluster_rates is not None:
+        cluster_vis = cluster_visibility_array()
+        cluster_id_a = agents["cluster_id"][aware_mask].astype(np.int64)
+        agent_cluster_rate = cluster_rates[cluster_id_a]
+        agent_cluster_vis = cluster_vis[cluster_id_a]
+        social = (
+            spn_a
+            * np.log1p(
+                agent_cluster_rate * social_visibility_a * agent_cluster_vis
+            )
+            * uncertainty_factor
+        )
+    else:
+        social = (
+            spn_a
+            * np.log1p(product_adoption * social_visibility_a)
+            * uncertainty_factor
+        )
     forces["social_proof"][aware_mask] = social
 
     # ═══════════════════════════════════════════════════════════════

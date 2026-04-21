@@ -93,10 +93,12 @@ class TestInitialStateStamping:
         assert (agents["trial_outcome"] == -1).all()
         assert (agents["trial_rounds_remaining"] == 0).all()
 
-    def test_initial_cluster_id_zero(self):
+    def test_initial_cluster_id_in_range(self):
+        """Wave 4: cluster_id populated by assign_clusters. Valid range [0, 6)."""
         rng = np.random.default_rng(42)
         agents = generate_population(n=100, rng=rng)
-        assert (agents["cluster_id"] == 0).all()
+        assert agents["cluster_id"].min() >= 0
+        assert agents["cluster_id"].max() < 6
 
 
 class TestApplyAwarenessPromotesPhase:
