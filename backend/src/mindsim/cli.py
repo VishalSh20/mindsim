@@ -40,8 +40,10 @@ def main():
     from mindsim.pipeline.calibrate import calibrate
     from mindsim.pipeline.events import process_event
     from mindsim.pipeline.research import research
+    from mindsim.pipeline.research_synthesizer import synthesize_market
     from mindsim.pipeline.simulate import simulate
     from mindsim.pipeline.understand import understand
+    from mindsim.pipeline.voc import analyze_voc
 
     product_text = args.product_description
     dump = DiagnosticDump(path=args.dump_path) if args.dump else None
@@ -79,10 +81,32 @@ def main():
             profile,
             skip=args.skip_research,
             budget=args.budget,
+            enable_scrapers=not args.skip_research,
         )
         if dump:
             dump.record_research(market)
         progress.update(task, completed=True, description="[green]✓ Research complete")
+
+        # Stage 2b (Wave 5): A3 VoC analyst + A2 research synthesizer.
+        # Skipped on --skip-research (no scraped / Tavily corpus to mine).
+        if not args.skip_research:
+            task = progress.add_task("[cyan]Mining voice-of-customer...", total=None)
+            voc_report = analyze_voc(market.scraped_docs_cache, profile, llm)
+            market.voc_report = voc_report
+            progress.update(task, completed=True, description="[green]✓ VoC analysis complete")
+
+            task = progress.add_task("[cyan]Synthesizing competitor matrix...", total=None)
+            synthesize_market(
+                context=market,
+                tavily_results=market.tavily_results_cache,
+                scraped_pricing_docs=[
+                    d for d in market.scraped_docs_cache if d.source == "pricing_page"
+                ],
+                voc=voc_report,
+                profile=profile,
+                llm_client=llm,
+            )
+            progress.update(task, completed=True, description="[green]✓ Synthesizer complete")
 
         # Stage 3: Calibrate
         task = progress.add_task("[cyan]Calibrating parameters...", total=None)
@@ -98,7 +122,7 @@ def main():
 
         # Stage 4: Simulate
         task = progress.add_task("[cyan]Running simulation (1,000 agents)...", total=None)
-        sim_result = simulate(config, rng=rng)
+        sim_result = simulate(config, rng=rng, market=market)
         if dump:
             dump.record_simulation(sim_result, config)
         progress.update(task, completed=True, description="[green]✓ Simulation complete")

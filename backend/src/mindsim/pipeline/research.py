@@ -14,10 +14,11 @@ from __future__ import annotations
 import logging
 import re
 
+from mindsim.engine.maturity import classify_from_signals
 from mindsim.models.market import MarketContext, VerifiedCompetitor
 from mindsim.models.product import ProductProfile
+from mindsim.scrape import HackerNewsClient, PricingScraper, RedditClient, ScrapeBudget
 from mindsim.tools.tavily_client import TavilyClient
-from mindsim.tools.trends import get_category_trends
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ def research(
     profile: ProductProfile,
     skip: bool = False,
     budget: int | None = None,
+    scrape_budget: int = 10,
+    enable_scrapers: bool = True,
 ) -> MarketContext:
     """Execute the adaptive research loop.
 
@@ -33,9 +36,12 @@ def research(
         profile: ProductProfile with ResearchPlan from understand stage.
         skip: If True, return empty MarketContext (--skip-research).
         budget: Max Tavily credits to spend.
+        scrape_budget: Max HTTP requests for scrapers (Reddit + HN + pricing).
+        enable_scrapers: If False, skip live scraping (tests / offline runs).
 
     Returns:
-        MarketContext with verified data and confidence flags.
+        MarketContext with verified data, confidence flags, and raw-evidence
+        caches (`tavily_results_cache`, `scraped_docs_cache`) for A2/A3.
     """
     if skip:
         logger.info("Research skipped (--skip-research)")
@@ -51,6 +57,9 @@ def research(
     for query in profile.research_plan.priority_queries:
         logger.info(f"Research query: {query.query}")
         result = tavily.search(query.query, search_depth="basic")
+        # Wave 5: cache raw Tavily results for A2 synthesizer.
+        for r in result.get("results", []) or []:
+            context.tavily_results_cache.append(r)
 
         if result.get("budget_exhausted"):
             low_confidence.append(f"Budget exhausted before: {query.goal}")
@@ -81,19 +90,22 @@ def research(
             if query.fallback_assumption:
                 low_confidence.append(f"Using fallback: {query.fallback_assumption}")
 
-    # Phase 2: Google Trends (always, free)
-    if profile.category:
-        keywords = [profile.category]
-        if profile.name:
-            keywords.append(profile.name)
-        trends = get_category_trends(keywords)
-        context.category_growth = trends.get("growth_rate")
-        context.category_maturity = trends.get("maturity")
-        growth_str = f"{context.category_growth:.2f}" if context.category_growth is not None else "N/A"
-        logger.info(
-            f"Trends: {context.category_maturity} "
-            f"(growth: {growth_str})"
-        )
+    # Phase 2: maturity classification from research signals (Wave 5).
+    # Replaces the Wave 0-4 pytrends call. No LLM, no external API —
+    # derives nascent/growing/mainstream/saturated from competitor count
+    # + scraped review volume (review_volume is 0 here; A2/A3 will fold
+    # scraped-corpus size in once they run).
+    n_comp = len(context.verified_competitors) + len(context.discovered_competitors)
+    review_volume = getattr(context, "_review_volume_hint", 0)
+    context.category_maturity = classify_from_signals(
+        n_competitors=n_comp,
+        review_volume=review_volume,
+        category_age_hint=profile.category,
+    )
+    # `category_growth` is no longer derived from Trends. Leave it None
+    # so downstream consumers treat it as missing rather than stale.
+    context.category_growth = None
+    logger.info("Maturity: %s (n_competitors=%d)", context.category_maturity, n_comp)
 
     # Phase 3: Optional queries (conditional)
     for opt_query in profile.research_plan.optional_queries:
@@ -102,17 +114,88 @@ def research(
                 logger.info(f"Optional query triggered: {opt_query.query}")
                 result = tavily.search(opt_query.query)
                 _integrate_result(context, result, opt_query.goal)
+                for r in result.get("results", []) or []:
+                    context.tavily_results_cache.append(r)
+
+    # Phase 4 (Wave 5): live scraping for VoC corpus.
+    if enable_scrapers:
+        _run_scrapers(profile, context, budget=scrape_budget)
+        # Re-classify maturity now that we have a review-volume signal.
+        n_comp = len(context.verified_competitors) + len(context.discovered_competitors)
+        review_volume = len(context.scraped_docs_cache)
+        context.category_maturity = classify_from_signals(
+            n_competitors=n_comp,
+            review_volume=review_volume,
+            category_age_hint=profile.category,
+        )
+        logger.info(
+            "Maturity re-classified with scraped corpus: %s (review_volume=%d)",
+            context.category_maturity, review_volume,
+        )
 
     context.low_confidence_flags = low_confidence
     context.research_cost = tavily.credits_used
 
     logger.info(
-        f"Research complete: {tavily.credits_used} credits, "
-        f"{len(context.verified_competitors)} verified competitors, "
-        f"{len(low_confidence)} low-confidence flags"
+        "Research complete: %d tavily credits, %d verified competitors, "
+        "%d scraped docs, %d low-confidence flags",
+        tavily.credits_used,
+        len(context.verified_competitors),
+        len(context.scraped_docs_cache),
+        len(low_confidence),
     )
 
     return context
+
+
+def _run_scrapers(
+    profile: ProductProfile,
+    context: MarketContext,
+    budget: int,
+) -> None:
+    """Populate `context.scraped_docs_cache` from Reddit + HN + pricing.
+
+    Splits the budget roughly 40/40/20 between Reddit / HN / pricing.
+    Failures are swallowed — callers proceed with whatever corpus they
+    managed to get.
+    """
+    if budget <= 0:
+        return
+    reddit_budget = max(1, int(budget * 0.4))
+    hn_budget = max(1, int(budget * 0.4))
+    pricing_budget = max(0, budget - reddit_budget - hn_budget)
+
+    query_terms = " ".join(filter(None, [profile.name, profile.category])).strip()
+    if not query_terms:
+        query_terms = profile.category or profile.name or ""
+    if not query_terms:
+        return
+
+    try:
+        reddit = RedditClient(budget=ScrapeBudget(limit=reddit_budget))
+        docs = reddit.search(query_terms, limit=15)
+        context.scraped_docs_cache.extend(docs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Reddit scraping failed: %s", exc)
+
+    try:
+        hn = HackerNewsClient(budget=ScrapeBudget(limit=hn_budget))
+        docs = hn.search(query_terms, limit=15)
+        context.scraped_docs_cache.extend(docs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("HN scraping failed: %s", exc)
+
+    if pricing_budget > 0:
+        try:
+            pricing = PricingScraper(budget=ScrapeBudget(limit=pricing_budget))
+            for comp in context.verified_competitors[:pricing_budget]:
+                if not comp.source_url:
+                    continue
+                doc = pricing.fetch(comp.source_url)
+                if doc is not None:
+                    context.scraped_docs_cache.append(doc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pricing scraping failed: %s", exc)
 
 
 def _evaluate_confidence(result: dict, goal: str) -> float:

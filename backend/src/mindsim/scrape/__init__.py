@@ -5,6 +5,7 @@ from mindsim.scrape.base import (
     USER_AGENT,
     get_rate_limiter,
     make_quote_id,
+    make_source_id,
     robots_allows,
 )
 from mindsim.scrape.hackernews import HackerNewsClient
@@ -18,6 +19,7 @@ __all__ = [
     "USER_AGENT",
     "get_rate_limiter",
     "make_quote_id",
+    "make_source_id",
     "robots_allows",
     "HackerNewsClient",
     "PricingScraper",

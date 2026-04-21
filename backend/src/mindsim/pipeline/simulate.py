@@ -25,6 +25,8 @@ import logging
 import numpy as np
 
 from mindsim.engine.archetypes import ArchetypeSet, load_archetypes
+from mindsim.engine.clusters import compute_cluster_adoption_rates
+from mindsim.engine.competitor_tiers import apply_tiered_reference_prices
 from mindsim.engine.forces import compute_decisions, compute_forces, compute_weighted_forces
 from mindsim.engine.population import AGENT_DTYPE, apply_awareness, generate_population
 from mindsim.engine.state_machine import (
@@ -60,6 +62,7 @@ def simulate(
     rng: np.random.Generator | None = None,
     archetype_set: ArchetypeSet | None = None,
     n_rounds: int | None = None,
+    market: "MarketContext | None" = None,
 ) -> SimulationResult:
     """Run the full simulation.
 
@@ -97,6 +100,19 @@ def simulate(
         rng=rng,
     )
 
+    # v2-middle Wave 5: per-agent tiered reference price override.
+    # No-op when the market context is None or no competitor carries a
+    # `market_share` value (keeps the archetype-based stamping from
+    # population.py as the fallback).
+    if market is not None and market.verified_competitors:
+        category_default = float(params.reference_price.value)
+        apply_tiered_reference_prices(
+            agents=agents,
+            competitors=market.verified_competitors,
+            category_default_price=category_default,
+            rng=rng,
+        )
+
     # 4b. INITIAL AWARENESS
     awareness_dict = {
         "innovator": params.awareness.innovator,
@@ -117,19 +133,26 @@ def simulate(
     final_adopt_prob: np.ndarray | None = None
 
     for round_idx in range(1, n_rounds + 1):
+        # ── cluster-local adoption rates (Wave 4) ──
+        # Computed ONCE at the top of each round from the state carried
+        # over from the previous round. Used both by the WOM awareness
+        # promotion and the cluster-local social-proof force.
+        cluster_rates = compute_cluster_adoption_rates(agents)
+
         # ── awareness update ──
         decay_awareness(agents)
         promote_unaware_to_aware(
             agents,
             product_adoption_rate=float(params.product_adoption_rate.value),
             rng=rng,
+            cluster_rates=cluster_rates,
         )
         promote_aware_to_considering(agents, params, rng=rng)
 
         sync_aware_flag(agents)
 
         # ── force computation + decision draw ──
-        forces = compute_forces(agents, params)
+        forces = compute_forces(agents, params, cluster_rates=cluster_rates)
         adopt_prob, _ = compute_decisions(forces, temperature=3.0, rng=rng)
 
         decide_considering_to_adopted(agents, adopt_prob, rng=rng)
@@ -139,10 +162,17 @@ def simulate(
         # ── snapshot ──
         sync_aware_flag(agents)
         total_adopt = total_adoption_count(agents)
+        # Post-round cluster rates for the snapshot (reflect this round's
+        # transitions; the `cluster_rates` computed at the top of the
+        # round were pre-transition).
+        post_cluster_rates = compute_cluster_adoption_rates(agents)
         snapshot = RoundSnapshot(
             round=round_idx,
             phase_counts=phase_counts(agents),
-            cluster_adoption={},       # populated in Wave 4
+            cluster_adoption={
+                i: float(post_cluster_rates[i])
+                for i in range(len(post_cluster_rates))
+            },
             total_adoption=total_adopt / max(n_agents, 1),
             aware_count=int(agents["aware"].sum()),
         )

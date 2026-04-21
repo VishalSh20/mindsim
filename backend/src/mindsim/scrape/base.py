@@ -36,9 +36,24 @@ class ScrapedDocument(BaseModel):
 
 
 def make_quote_id(url: str, snippet: str) -> str:
-    """Deterministic 12-char id for referencing a quote across the pipeline."""
+    """Deterministic 12-char id for referencing a quote across the pipeline.
+
+    Prefixed with "voc:" so downstream Wave 8.5 EvidenceStore can route by
+    source type without a separate field.
+    """
     digest = hashlib.sha256(f"{url}|{snippet}".encode("utf-8")).hexdigest()
-    return digest[:12]
+    return f"voc:{digest[:12]}"
+
+
+def make_source_id(url: str, snippet: str) -> str:
+    """Deterministic id for referencing a research source (Tavily/web).
+
+    Distinct from make_quote_id — sources are research artefacts (third-
+    party reporting, pricing pages), quotes are end-user voice. Wave 8.5
+    EvidenceStore distinguishes them via this prefix.
+    """
+    digest = hashlib.sha256(f"{url}|{snippet}".encode("utf-8")).hexdigest()
+    return f"src:{digest[:12]}"
 
 
 class RateLimiter:
