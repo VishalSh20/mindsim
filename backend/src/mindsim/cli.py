@@ -38,14 +38,29 @@ def main():
     from mindsim.models.results import AnalysisReport, SimulationResult
     from mindsim.pipeline.analyze import analyze
     from mindsim.pipeline.calibrate import calibrate
-    from mindsim.pipeline.events import process_event
+    from mindsim.pipeline.events import attach_session, process_event
     from mindsim.pipeline.research import research
     from mindsim.pipeline.research_synthesizer import synthesize_market
-    from mindsim.pipeline.simulate import simulate
+    from mindsim.pipeline.session import (
+        SessionVersionError,
+        append_event_to_history,
+        load_session,
+        new_run_id,
+        save_session,
+    )
+    from mindsim.pipeline.simulate import (
+        run_rounds,
+        simulate,
+        snapshot_state,
+        summarize_state,
+    )
     from mindsim.pipeline.understand import understand
     from mindsim.pipeline.voc import analyze_voc
 
     product_text = args.product_description
+    if not args.session and not product_text:
+        console.print("[red]Error: product_description is required unless --session is given[/]")
+        sys.exit(2)
     dump = DiagnosticDump(path=args.dump_path) if args.dump else None
 
     console.print()
@@ -63,97 +78,152 @@ def main():
 
     start_time = time.time()
 
+    # Wave 6 session lineage. parent_run_id is the loaded session's run_id;
+    # event_history accumulates across the lineage so the saved file holds
+    # the full chain of "what happened to this population".
+    parent_run_id: str | None = None
+    event_history: list = []
+    run_id = new_run_id()
+    market = None  # populated either by research stage or skipped on session-load
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        # Stage 1: Understand
-        task = progress.add_task("[cyan]Understanding product...", total=None)
-        profile = understand(product_text, llm)
-        if dump:
-            dump.record_understand(profile)
-        progress.update(task, completed=True, description="[green]✓ Product understood")
-
-        # Stage 2: Research
-        task = progress.add_task("[cyan]Researching market...", total=None)
-        market = research(
-            profile,
-            skip=args.skip_research,
-            budget=args.budget,
-            enable_scrapers=not args.skip_research,
-        )
-        if dump:
-            dump.record_research(market)
-        progress.update(task, completed=True, description="[green]✓ Research complete")
-
-        # Stage 2b (Wave 5): A3 VoC analyst + A2 research synthesizer.
-        # Skipped on --skip-research (no scraped / Tavily corpus to mine).
-        if not args.skip_research:
-            task = progress.add_task("[cyan]Mining voice-of-customer...", total=None)
-            voc_report = analyze_voc(market.scraped_docs_cache, profile, llm)
-            market.voc_report = voc_report
-            progress.update(task, completed=True, description="[green]✓ VoC analysis complete")
-
-            task = progress.add_task("[cyan]Synthesizing competitor matrix...", total=None)
-            synthesize_market(
-                context=market,
-                tavily_results=market.tavily_results_cache,
-                scraped_pricing_docs=[
-                    d for d in market.scraped_docs_cache if d.source == "pricing_page"
-                ],
-                voc=voc_report,
-                profile=profile,
-                llm_client=llm,
+        if args.session:
+            # ── Session-resume path: skip 1-4, load persisted agents + config. ──
+            task = progress.add_task(f"[cyan]Loading session {args.session}...", total=None)
+            try:
+                state = load_session(args.session)
+            except SessionVersionError as exc:
+                console.print(f"[red]Session refused: {exc}[/]")
+                sys.exit(2)
+            config = state.config
+            parent_run_id = state.run_id
+            event_history = list(state.event_history)
+            progress.update(
+                task,
+                completed=True,
+                description=f"[green]✓ Session loaded (parent={parent_run_id}, n={state.n_agents})",
             )
-            progress.update(task, completed=True, description="[green]✓ Synthesizer complete")
 
-        # Stage 3: Calibrate
-        task = progress.add_task("[cyan]Calibrating parameters...", total=None)
-        config = calibrate(profile, market, llm)
+            if args.override:
+                config = _apply_overrides(config, args.override)
 
-        # Apply CLI overrides
-        if args.override:
-            config = _apply_overrides(config, args.override)
+            task = progress.add_task("[cyan]Snapshotting state...", total=None)
+            sim_result = snapshot_state(state.agents, config.simulation_params, rng)
+            attach_session(sim_result, state.agents)
+            progress.update(task, completed=True, description="[green]✓ State snapshot ready")
+        else:
+            # ── Fresh-run path: full pipeline. ──
+            task = progress.add_task("[cyan]Understanding product...", total=None)
+            profile = understand(product_text, llm)
+            if dump:
+                dump.record_understand(profile)
+            progress.update(task, completed=True, description="[green]✓ Product understood")
 
-        if dump:
-            dump.record_calibration(config)
-        progress.update(task, completed=True, description="[green]✓ Parameters calibrated")
+            task = progress.add_task("[cyan]Researching market...", total=None)
+            market = research(
+                profile,
+                skip=args.skip_research,
+                budget=args.budget,
+                enable_scrapers=not args.skip_research,
+            )
+            if dump:
+                dump.record_research(market)
+            progress.update(task, completed=True, description="[green]✓ Research complete")
 
-        # Stage 4: Simulate
-        task = progress.add_task("[cyan]Running simulation (1,000 agents)...", total=None)
-        sim_result = simulate(config, rng=rng, market=market)
-        if dump:
-            dump.record_simulation(sim_result, config)
-        progress.update(task, completed=True, description="[green]✓ Simulation complete")
+            if not args.skip_research:
+                task = progress.add_task("[cyan]Mining voice-of-customer...", total=None)
+                voc_report = analyze_voc(market.scraped_docs_cache, profile, llm)
+                market.voc_report = voc_report
+                progress.update(task, completed=True, description="[green]✓ VoC analysis complete")
 
-        # Stage 4e: Events
+                task = progress.add_task("[cyan]Synthesizing competitor matrix...", total=None)
+                synthesize_market(
+                    context=market,
+                    tavily_results=market.tavily_results_cache,
+                    scraped_pricing_docs=[
+                        d for d in market.scraped_docs_cache if d.source == "pricing_page"
+                    ],
+                    voc=voc_report,
+                    profile=profile,
+                    llm_client=llm,
+                )
+                progress.update(task, completed=True, description="[green]✓ Synthesizer complete")
+
+            task = progress.add_task("[cyan]Calibrating parameters...", total=None)
+            config = calibrate(profile, market, llm)
+            if args.override:
+                config = _apply_overrides(config, args.override)
+            if dump:
+                dump.record_calibration(config)
+            progress.update(task, completed=True, description="[green]✓ Parameters calibrated")
+
+            task = progress.add_task("[cyan]Running simulation (1,000 agents)...", total=None)
+            sim_result = simulate(config, rng=rng, market=market)
+            if dump:
+                dump.record_simulation(sim_result, config)
+            progress.update(task, completed=True, description="[green]✓ Simulation complete")
+
+        # Stage 4e: Events (shared by both paths)
         event_results = []
         if args.event:
             for event_text in args.event:
                 task = progress.add_task(
                     f"[cyan]Processing event: {event_text[:40]}...", total=None
                 )
+                adoption_before = sim_result.total_adoption
                 sim_result, event_result = process_event(
                     event_text, sim_result, config, llm, rng
+                )
+                event_history = append_event_to_history(
+                    event_history,
+                    event_text,
+                    adoption_before,
+                    sim_result.total_adoption,
                 )
                 event_results.append(event_result)
                 if dump:
                     dump.record_event(event_text, event_result)
-                progress.update(task, completed=True, description=f"[green]✓ Event processed")
+                progress.update(task, completed=True, description="[green]✓ Event processed")
 
         # Stage 5: Analyze
         task = progress.add_task("[cyan]Analyzing results...", total=None)
-        report = analyze(sim_result, config, llm, rng)
+        report = analyze(sim_result, config, llm, rng, market=market)
         if dump:
             dump.record_analysis(report)
         progress.update(task, completed=True, description="[green]✓ Analysis complete")
+
+        if args.session_out:
+            if sim_result._agents is None:
+                console.print("[yellow]No agent array to persist; --session-out skipped[/]")
+            else:
+                task = progress.add_task("[cyan]Saving session...", total=None)
+                saved = save_session(
+                    path=args.session_out,
+                    agents=sim_result._agents,
+                    config=config,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    event_history=event_history,
+                )
+                progress.update(
+                    task,
+                    completed=True,
+                    description=f"[green]✓ Session saved: {saved}",
+                )
 
     elapsed = time.time() - start_time
 
     # Display results
     console.print()
     _display_results(sim_result, report, config, elapsed)
+
+    # Wave 8.5 — fully expanded EvidenceStore on demand.
+    if args.show_evidence:
+        _display_evidence_store(sim_result)
 
     # Write diagnostic dump
     if dump:
@@ -173,7 +243,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "product_description",
-        help="Natural language product description",
+        nargs="?",
+        default=None,
+        help="Natural language product description (omit when using --session)",
     )
     parser.add_argument(
         "--event", "-e",
@@ -221,6 +293,22 @@ def parse_args() -> argparse.Namespace:
         default="mindsim_dump.json",
         help="Path for diagnostic dump file (default: mindsim_dump.json)",
     )
+    parser.add_argument(
+        "--session",
+        default=None,
+        help="Load a previously-saved session (.npz). Skips understand/research/calibrate/simulate "
+             "and applies any --event flags directly to the persisted population.",
+    )
+    parser.add_argument(
+        "--session-out",
+        default=None,
+        help="Save the post-event session state to this path (.npz).",
+    )
+    parser.add_argument(
+        "--show-evidence",
+        action="store_true",
+        help="Print the full EvidenceStore (Wave 8.5) at end of run.",
+    )
     return parser.parse_args()
 
 
@@ -257,14 +345,24 @@ def _display_results(
         f"Agents: {sim_result.n_agents}"
     )
 
-    # ── PROXIMITY ──
+    # ── PROXIMITY (Wave 8 relabel) ──
+    # Multi-round semantics: under Wave 3+ most decideable agents have
+    # already settled, so the legacy "Locked / Convertible / Unreachable"
+    # labels misled the reader (Locked: 0% on a successful run). The new
+    # phrasing reflects what the buckets actually represent in the final
+    # round's holdouts: the convertible pool is the strategic lever.
     prox = sim_result.by_proximity
     prox_text = (
-        f"Convertible pool: [yellow]{prox.convertible*100:.0f}%[/] │ "
-        f"Locked: [green]{prox.locked*100:.0f}%[/] │ "
-        f"Unreachable: [red]{prox.unreachable*100:.0f}%[/]"
+        f"Holdout pool — Decision-ready: [green]{prox.locked*100:.0f}%[/] │ "
+        f"Convertible: [yellow]{prox.convertible*100:.0f}%[/] │ "
+        f"Stalled: [red]{prox.unreachable*100:.0f}%[/]"
     )
     console.print(prox_text)
+    if report.kpi:
+        console.print(
+            f"  ↳ {report.kpi.convertible_pool} agents sit at "
+            f"P(adopt) ∈ [0.40, 0.60] — flippable with small interventions"
+        )
     console.print()
 
     # ── FORCE DECOMPOSITION ──
@@ -314,15 +412,58 @@ def _display_results(
             console.print(f"  {adj.force}: {adj.magnitude:+.2f}  \"{adj.mechanism[:60]}\"")
         console.print()
 
-    # ── INTERVENTIONS ──
+    # ── INTERVENTIONS (Wave 7) ──
+    # Ranked by cost-per-adoption-pp ascending. Combo row (if any) lives
+    # at the end and gets its own subsection.
     if report.interventions:
-        console.print("[bold]INTERVENTIONS[/]")
-        for i, intv in enumerate(report.interventions[:5], 1):
-            console.print(
-                f"  #{i} {intv.name:20s} "
-                f"[green]{intv.lift_pp:+.0f}pp[/] "
-                f"({intv.adoption_before*100:.0f}%→{intv.adoption_after*100:.0f}%)"
+        import math as _math
+        singles = [i for i in report.interventions if i.combined_with is None]
+        combos = [i for i in report.interventions if i.combined_with is not None]
+
+        console.print("[bold]INTERVENTIONS[/] (ranked by cost-per-adoption-pp)")
+        intv_table = Table(show_header=True, box=None, padding=(0, 1))
+        intv_table.add_column("#", width=3)
+        intv_table.add_column("Name", width=22)
+        intv_table.add_column("Lift", width=8, justify="right")
+        intv_table.add_column("Rounds", width=6, justify="right")
+        intv_table.add_column("Cost", width=14, justify="right")
+        intv_table.add_column("$/pp", width=10, justify="right")
+        for i, intv in enumerate(singles[:5], 1):
+            lift_color = "green" if intv.lift_pp > 0 else "red"
+            cost_str = (
+                f"${intv.cost_usd_low/1000:.0f}–${intv.cost_usd_high/1000:.0f}k"
+                if intv.cost_usd_high > 0
+                else "free"
             )
+            cpp_str = (
+                f"${intv.cost_per_adoption_pp/1000:.1f}k"
+                if _math.isfinite(intv.cost_per_adoption_pp)
+                else "—"
+            )
+            intv_table.add_row(
+                str(i),
+                intv.name,
+                f"[{lift_color}]{intv.lift_pp:+.1f}pp[/]",
+                str(intv.timeline_rounds),
+                cost_str,
+                cpp_str,
+            )
+        console.print(intv_table)
+
+        if combos:
+            console.print()
+            console.print("[bold]PAIRWISE COMBO[/] (top-2 applied together)")
+            for combo in combos:
+                tag_color = {
+                    "super_additive": "green",
+                    "sub_additive": "yellow",
+                    "additive": "cyan",
+                }.get(combo.additivity or "additive", "cyan")
+                console.print(
+                    f"  {combo.name}: [{tag_color}]{combo.lift_pp:+.1f}pp[/] "
+                    f"([{tag_color}]{combo.additivity}[/])"
+                )
+                console.print(f"    {combo.mechanism}")
         console.print()
 
     # ── ASSUMPTIONS ──
@@ -351,12 +492,107 @@ def _display_results(
     console.print(seg_table)
     console.print()
 
+    # ── KPI DASHBOARD (Wave 8) ──
+    if report.kpi:
+        kpi = report.kpi
+        kpi_table = Table(show_header=False, box=None, padding=(0, 1))
+        kpi_table.add_column("Metric", width=28)
+        kpi_table.add_column("Value", style="cyan")
+        ttf = kpi.adoption.time_to_50pct
+        ttf_str = f"round {ttf}" if ttf is not None else "not reached"
+        chasm_str = (
+            f"round {kpi.adoption.chasm_round}"
+            if kpi.adoption.chasm_round is not None
+            else "no stall detected"
+        )
+        kpi_table.add_row("Time to 50% adoption", ttf_str)
+        kpi_table.add_row("Chasm round", chasm_str)
+        kpi_table.add_row("Top driver", kpi.force_dominance.top_driver or "—")
+        kpi_table.add_row("Top blocker", kpi.force_dominance.top_blocker or "—")
+        kpi_table.add_row("Convertible pool", f"{kpi.convertible_pool} agents")
+        if kpi.cascade and kpi.cascade.first_cluster_crossed_critical_mass is not None:
+            kpi_table.add_row(
+                "First cluster to critical mass",
+                f"cluster {kpi.cascade.first_cluster_crossed_critical_mass}",
+            )
+        if kpi.top_sensitivity_params:
+            kpi_table.add_row(
+                "Top sensitivity params",
+                ", ".join(kpi.top_sensitivity_params),
+            )
+        console.print("[bold]KPI DASHBOARD[/]")
+        console.print(kpi_table)
+        console.print()
+
+    # ── TRIANGULATED PROS / CONS (Wave 8) ──
+    if report.pros_cons:
+        triangulated = [p for p in report.pros_cons if p.polarity in ("pro", "con")]
+        nuances = [p for p in report.pros_cons if p.polarity == "nuance"]
+        if triangulated or nuances:
+            console.print("[bold]TRIANGULATED PROS / CONS[/]")
+            if triangulated:
+                for item in triangulated:
+                    color = "green" if item.polarity == "pro" else "red"
+                    console.print(f"  [{color}][{item.polarity.upper()}][/] {item.statement}")
+                    console.print(f"    [dim]{item.mechanism}[/]")
+            if nuances:
+                console.print(
+                    "  [yellow]One-sided signal — directional only:[/]"
+                )
+                for item in nuances[:5]:  # cap so the panel stays readable
+                    console.print(f"    [dim]• {item.statement}[/]")
+            console.print()
+
+    # ── SEGMENT NARRATIVES (Wave 8) ──
+    if report.segments and report.segments.segments:
+        console.print("[bold]PER-SEGMENT NARRATIVES[/]")
+        for seg in report.segments.segments:
+            rate_color = (
+                "green" if seg.adoption_rate > 0.5
+                else "yellow" if seg.adoption_rate > 0.2 else "red"
+            )
+            console.print(
+                f"  [cyan]{seg.archetype}[/] "
+                f"[{rate_color}]{seg.adoption_rate*100:.1f}%[/] "
+                f"({seg.count}/{seg.total}) — "
+                f"driver: {seg.dominant_driver} "
+                f"({seg.dominant_driver_value:+.2f}), "
+                f"blocker: {seg.dominant_blocker} "
+                f"({seg.dominant_blocker_value:+.2f})"
+            )
+            for traj in seg.representative_trajectories[:2]:
+                console.print(f"    [dim]· {traj}[/]")
+        console.print()
+
     # ── AUDIT TEXT ──
     if report.text:
         console.print(Panel(report.text, title="[bold]Behavioral Audit[/]", border_style="blue"))
         console.print()
 
     console.print(f"[dim]Completed in {elapsed:.1f}s • {sim_result.n_agents} agents[/]")
+
+
+def _display_evidence_store(sim_result):
+    """Wave 8.5 — print the resolvable EvidenceStore."""
+    store = getattr(sim_result, "evidence_store", None)
+    if store is None or not store.by_id:
+        console.print("[dim]No EvidenceStore attached (skip-research run?).[/]")
+        return
+    console.print()
+    console.print(f"[bold]EVIDENCE STORE[/] ({len(store)} records, post-compression)")
+    for eid, ev in store.by_id.items():
+        type_color = {
+            "voc": "magenta", "research": "cyan",
+            "trends": "yellow", "default": "dim", "llm_judgment": "blue",
+        }.get(ev.source_type, "white")
+        console.print(
+            f"  [{type_color}]{eid}[/] ({ev.source_type}, conf {ev.confidence:.2f})"
+        )
+        if ev.source_url:
+            console.print(f"    [dim]{ev.source_url}[/]")
+        if ev.text:
+            console.print(f"    \"{ev.text[:120]}{'…' if len(ev.text) > 120 else ''}\"")
+    console.print()
 
 
 def _force_bar(value: float, width: int = 20) -> str:

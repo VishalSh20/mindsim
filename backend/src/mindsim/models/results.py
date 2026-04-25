@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from mindsim.models.evidence import EvidenceStore
+
 
 class ForceDecomposition(BaseModel):
     """Weighted force averages for display."""
@@ -107,6 +109,11 @@ class SimulationResult(BaseModel):
     _agent_decisions: object = None
     _agents: object = None
 
+    # Wave 8.5 — populated by analyze() at the end of the pipeline. Carries
+    # only evidence records actually referenced by some artefact (params,
+    # assumptions, ProsConsItems). Compression happens at insertion.
+    evidence_store: "EvidenceStore | None" = None
+
 
 class SensitivityResult(BaseModel):
     """Sensitivity analysis for a single parameter."""
@@ -129,7 +136,14 @@ class ConfidenceBand(BaseModel):
 
 
 class InterventionResult(BaseModel):
-    """Ranked intervention with predicted lift."""
+    """Ranked intervention with predicted lift, cost, and timeline.
+
+    Wave 7: every intervention now carries cost and timeline so ranking
+    is by cost-per-adoption-lift rather than raw lift. The
+    `cost_usd_low` / `cost_usd_high` pair surfaces the underlying
+    estimate uncertainty (the spec's design choice — point cost numbers
+    are noisy enough that a range is more honest).
+    """
 
     name: str
     description: str
@@ -137,6 +151,17 @@ class InterventionResult(BaseModel):
     adoption_after: float
     lift_pp: float  # percentage points
     mechanism: str
+    mechanism_type: str = ""  # free_trial | price_cut | annual_discount | social_proof_push | freemium
+    cost_usd_low: float = 0.0
+    cost_usd_high: float = 0.0
+    timeline_rounds: int = 1
+    # USD per percentage point of adoption lift. math.inf when lift_pp <= 0.
+    # Primary ranking key — see analyze.py.
+    cost_per_adoption_pp: float = float("inf")
+    # Optional pairwise-combination metadata (set by rank_interventions when
+    # this row represents a combo of two single interventions).
+    combined_with: str | None = None
+    additivity: str | None = None  # "sub_additive" | "super_additive" | "additive"
 
 
 class AnalysisReport(BaseModel):
@@ -155,6 +180,12 @@ class AnalysisReport(BaseModel):
     # Assumptions table
     assumptions: list[dict] = Field(default_factory=list)
 
+    # Wave 8 additions — populated by pipeline/kpi.py, segments.py, pros_cons.py.
+    # All optional / empty by default so older Wave 0-7 code paths keep working.
+    kpi: "KPIDashboard | None" = None
+    segments: "SegmentReport | None" = None
+    pros_cons: list["ProsConsItem"] = Field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # v2-middle additions (Wave 0): new models wired up in later waves.
@@ -171,10 +202,23 @@ class RoundSnapshot(BaseModel):
     aware_count: int = 0
 
 
+class EvidenceStrength(BaseModel):
+    """Wave 8.5 — counts of supporting evidence for a single claim."""
+
+    n_sim: int = 0
+    n_voc: int = 0
+    cls: Literal["triangulated", "nuance", "weak"] = "weak"
+
+
 class ProsConsItem(BaseModel):
     """Triangulated pros/cons claim — requires both simulation and VoC evidence.
 
     `polarity="nuance"` is used when only one evidence source supports the claim.
+
+    Wave 8.5: `evidence_strength` makes the underlying counts visible.
+    `cls` is mechanically derived: n_sim≥1 AND n_voc≥1 → triangulated;
+    exactly one side → nuance; zero → weak (validator should block these
+    from reaching the narrative author).
     """
 
     statement: str
@@ -183,6 +227,9 @@ class ProsConsItem(BaseModel):
     mechanism: str = ""
     simulation_evidence: dict[str, Any] = Field(default_factory=dict)
     voc_evidence: list[str] = Field(default_factory=list)  # quote_ids
+
+    # Wave 8.5.
+    evidence_strength: EvidenceStrength = Field(default_factory=EvidenceStrength)
 
 
 class AdoptionSummary(BaseModel):
@@ -212,3 +259,29 @@ class KPIDashboard(BaseModel):
     cascade: CascadeMetrics | None = None
     top_sensitivity_params: list[str] = Field(default_factory=list)
     validation_score: float | None = None
+
+
+class ArchetypeNarrative(BaseModel):
+    """Per-archetype adoption story (Wave 8)."""
+
+    archetype: str
+    adoption_rate: float
+    count: int
+    total: int
+    dominant_driver: str = ""
+    dominant_driver_value: float = 0.0
+    dominant_blocker: str = ""
+    dominant_blocker_value: float = 0.0
+    representative_trajectories: list[str] = Field(default_factory=list)
+
+
+class SegmentReport(BaseModel):
+    """Per-archetype dominant drivers / blockers + sample trajectories."""
+
+    segments: list[ArchetypeNarrative] = Field(default_factory=list)
+
+
+# Resolve the forward-references in AnalysisReport (kpi/segments/pros_cons)
+# and SimulationResult (evidence_store).
+AnalysisReport.model_rebuild()
+SimulationResult.model_rebuild()

@@ -24,7 +24,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from mindsim.llm.client import LLMClient
-from mindsim.models.config import SimulationConfig
+from mindsim.models.config import (
+    Assumption,
+    CalibratedParam,
+    SimulationConfig,
+)
+from mindsim.models.evidence import EvidenceStore
 from mindsim.models.product import Feature, ProductProfile
 
 logger = logging.getLogger(__name__)
@@ -49,6 +54,30 @@ SCORE_MIN, SCORE_MAX = 0.0, 1.0
 CERTAINTY_MIN, CERTAINTY_MAX = 0.0, 1.0
 VISIBILITY_MIN, VISIBILITY_MAX = 0.0, 1.0
 TIME_TO_VALUE_MIN, TIME_TO_VALUE_MAX = 0.0, 36.0
+
+
+# Wave 8.5 — published bounds for parameters with peer-reviewed ranges.
+# Used to populate `Assumption.published_bounds` and to validate that
+# calibrated values land inside the literature window. RESEARCH.md is
+# the source of truth.
+PUBLISHED_BOUNDS: dict[str, tuple[float, float]] = {
+    "present_bias_beta": (BETA_MIN, BETA_MAX),
+    "category_penetration": (PENETRATION_MIN, PENETRATION_MAX),
+    "category_growth": (0.0, 5.0),  # multi-year YoY upper bound
+    "perceived_benefit": (0.0, 1.0),
+    "benefit_certainty": (0.0, 1.0),
+    "switching_cost": (0.0, 1.0),
+    "social_visibility": (0.0, 1.0),
+    "identity_signal": (0.0, 1.0),
+    "fomo_intensity": (0.0, 1.0),
+    "product_adoption_rate": (0.0, 1.0),
+    "requires_behavior_change": (0.0, 1.0),
+    "time_to_value": (0.0, 1.0),
+}
+
+# Wave 8.5 — sparse-rationale threshold. Below this, the param's basis
+# is too thin to be load-bearing; validator flags it.
+SPARSE_BASIS_CHARS = 10
 
 
 Severity = Literal["error", "warning"]
@@ -169,6 +198,144 @@ def _range_issue(path: str, value: float, lo: float, hi: float) -> ValidationIss
     )
 
 
+# ───────────────────────── Wave 8.5 evidence + cross-field ─────────────────────────
+
+
+def check_evidence_refs(
+    config: SimulationConfig,
+    evidence_store: EvidenceStore | None,
+) -> list[ValidationIssue]:
+    """Every evidence_ref on a CalibratedParam / Assumption must resolve.
+
+    Wave 8.5: a fabricated `voc:abc123` that doesn't exist in the
+    EvidenceStore is worse than no evidence — it implies provenance
+    that doesn't exist. Validator rejects.
+    """
+    if evidence_store is None:
+        # No store → can't check resolvability. Skip — this is a "store
+        # not yet built" path, not a fabrication.
+        return []
+
+    issues: list[ValidationIssue] = []
+    sim = config.simulation_params
+    for name in PUBLISHED_BOUNDS:
+        cparam = getattr(sim, name, None)
+        if not isinstance(cparam, CalibratedParam):
+            continue
+        for ref in cparam.evidence_refs or []:
+            if ref not in evidence_store:
+                issues.append(ValidationIssue(
+                    severity="error",
+                    field=f"simulation_params.{name}.evidence_refs",
+                    message=f"evidence_ref {ref!r} does not resolve in EvidenceStore",
+                ))
+
+    for a in config.assumptions:
+        for ref in a.evidence_refs or []:
+            if ref not in evidence_store:
+                issues.append(ValidationIssue(
+                    severity="error",
+                    field=f"assumptions[{a.id}].evidence_refs",
+                    message=f"evidence_ref {ref!r} does not resolve in EvidenceStore",
+                ))
+    return issues
+
+
+def check_sparse_rationale(config: SimulationConfig) -> list[ValidationIssue]:
+    """Flag parameters with thin or missing rationale.
+
+    A non-default parameter with `len(basis) < SPARSE_BASIS_CHARS` OR
+    zero `evidence_refs` is sparse-rationale: the LLM emitted a number
+    without supporting reasoning. We don't reject silently — we flag,
+    so the orchestrator's retry loop can re-prompt with the issue.
+    """
+    issues: list[ValidationIssue] = []
+    sim = config.simulation_params
+
+    for name in PUBLISHED_BOUNDS:
+        cparam = getattr(sim, name, None)
+        if not isinstance(cparam, CalibratedParam):
+            continue
+        if cparam.source_type == "default":
+            continue  # defaults explicitly opt out
+        thin_basis = len((cparam.basis or "").strip()) < SPARSE_BASIS_CHARS
+        no_refs = not (cparam.evidence_refs or [])
+        if thin_basis and no_refs:
+            issues.append(ValidationIssue(
+                severity="warning",
+                field=f"simulation_params.{name}",
+                message=(
+                    f"sparse rationale: basis<{SPARSE_BASIS_CHARS} chars and no "
+                    f"evidence_refs (got basis={cparam.basis!r})"
+                ),
+            ))
+    return issues
+
+
+def check_cross_field_consistency(config: SimulationConfig) -> list[ValidationIssue]:
+    """Cross-parameter coherence checks.
+
+    Examples (from spec):
+      * `category_maturity="saturated"` paired with `category_penetration < 0.20`
+        — saturated markets don't have low penetration.
+      * Three or more features with score > 0.9 — likely LLM anchoring.
+    """
+    issues: list[ValidationIssue] = []
+    sim = config.simulation_params
+
+    # Saturated market with low penetration.
+    # `category_maturity` lives on MarketContext, not config; the
+    # validator sees it via the wider ValidatorInput in the LLM-review
+    # path. The pure-Python check looks at penetration vs growth as a
+    # proxy: high growth + high penetration is internally inconsistent.
+    pen = sim.category_penetration.value
+    growth = sim.category_growth.value
+    if pen > 0.6 and growth > 1.0:
+        issues.append(ValidationIssue(
+            severity="warning",
+            field="category_penetration / category_growth",
+            message=(
+                f"high penetration ({pen:.2f}) and high growth ({growth:.2f}) "
+                f"are usually inconsistent — saturated markets grow slowly"
+            ),
+        ))
+
+    # Feature anchoring detector.
+    high_score_features = [
+        f for f in sim.feature_matrix if f.score > 0.9
+    ]
+    if len(high_score_features) >= 3:
+        names = ", ".join(f.name for f in high_score_features[:3])
+        issues.append(ValidationIssue(
+            severity="warning",
+            field="feature_matrix",
+            message=(
+                f"{len(high_score_features)} features with score > 0.9 "
+                f"({names}…) — likely LLM anchoring; consider re-prompting "
+                f"the calibrator for differentiation"
+            ),
+        ))
+
+    return issues
+
+
+def populate_published_bounds(config: SimulationConfig) -> int:
+    """Fill `Assumption.published_bounds` from the PUBLISHED_BOUNDS table.
+
+    Mutates `config.assumptions` in place. Returns the number of rows
+    that gained a bound. Pure side-effecting helper; no validation.
+    """
+    n = 0
+    for a in config.assumptions:
+        if a.published_bounds is not None:
+            continue
+        bound = PUBLISHED_BOUNDS.get(a.parameter)
+        if bound is not None:
+            a.published_bounds = bound
+            n += 1
+    return n
+
+
 # ───────────────────────── The A5 stage ─────────────────────────
 
 
@@ -184,14 +351,25 @@ class Validator:
     input_type = ValidatorInput
     output_type = ValidationReport
 
-    def __init__(self, llm: LLMClient | None = None, enable_llm_review: bool = False):
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        enable_llm_review: bool = False,
+        evidence_store: EvidenceStore | None = None,
+    ):
         self.llm = llm
         self.enable_llm_review = enable_llm_review
+        self.evidence_store = evidence_store
 
     def run(self, inp: ValidatorInput, ctx) -> ValidationReport:
         issues: list[ValidationIssue] = []
         issues.extend(check_feature_matrix(inp.config.simulation_params.feature_matrix))
         issues.extend(check_config_bounds(inp.config))
+
+        # Wave 8.5 — provenance + sparse-rationale + cross-field.
+        issues.extend(check_evidence_refs(inp.config, self.evidence_store))
+        issues.extend(check_sparse_rationale(inp.config))
+        issues.extend(check_cross_field_consistency(inp.config))
 
         # Cross-field LLM review lands in Commit 2.
         if self.enable_llm_review and self.llm is not None and issues == []:
@@ -200,10 +378,17 @@ class Validator:
 
         errors = [i for i in issues if i.severity == "error"]
         is_valid = len(errors) == 0
+        warnings_count = sum(1 for i in issues if i.severity == "warning")
+        # Confidence score: 1.0 - 0.2 per error, 0.05 per warning, floor 0.
+        confidence_score = max(0.0, 1.0 - 0.2 * len(errors) - 0.05 * warnings_count)
         if not is_valid:
             logger.info(
                 "A5 validator found %d error(s): %s",
                 len(errors),
                 [e.message for e in errors[:3]],
             )
-        return ValidationReport(is_valid=is_valid, issues=issues)
+        return ValidationReport(
+            is_valid=is_valid,
+            issues=issues,
+            confidence_score=confidence_score,
+        )

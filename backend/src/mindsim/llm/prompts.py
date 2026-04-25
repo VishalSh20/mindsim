@@ -157,6 +157,12 @@ Placeholder estimates are OK — Wave 4 replaces them with scraped data.
 EVERY non-feature parameter must still have:
 - value, basis, confidence (0-1)
 
+Wave 8.5 — when the supplied research summary contains source_ids or VoC quote_ids that \
+support a number, ALSO include them as `evidence_refs: ["src:abc", "voc:xyz", ...]`. \
+These IDs MUST be drawn from the supplied evidence — do not fabricate them. When you \
+genuinely have no supporting evidence (e.g. the parameter is a behavioral-science \
+default), set `source_type: "default"` instead of inventing references.
+
 OPTIONAL per-archetype overrides (by_archetype):
 Some non-feature parameters vary by archetype (Rogers 1962). Include by_archetype with keys \
 from {"innovator","early_adopter","early_majority","late_majority","laggard"} when warranted:
@@ -233,6 +239,21 @@ You must reason about MECHANISMS, not just direction. For each force, explain:
 
 The 7 forces and their current values are provided in the context.
 
+WAVE 6 — STATE PERSISTS BETWEEN EVENTS:
+The simulation no longer regenerates agents per event. The phase distribution and \
+per-archetype phase breakdown in the context describe agents whose state has been \
+carried over from prior rounds and prior events. Reason about them differently:
+
+- ADOPTED / LOCKED_IN agents already chose this product. They are NOT redrawn — they \
+  can only churn out via the state-machine churn check (small per-round probability). \
+  Events targeting them must move the churn dial (e.g. "competitor matches feature" \
+  raises the implicit cost of staying), not the adoption dial.
+- CONSIDERING / AWARE agents are the convertible pool the event most directly affects.
+- CHURNED agents remember the product but won't re-enter consideration this run.
+
+If the event interacts with installed base (e.g. "competitor poaches users"), say so \
+in `second_order_effects` even if you can't directly model churn from it.
+
 RULES:
 - Be specific about magnitudes. "Slightly increases" is not acceptable. Give numbers.
 - Reference price changes must include the new reference price computation.
@@ -269,17 +290,62 @@ Return ONLY this JSON:
 
 ANALYZE_PROMPT = """\
 You are mindsim's behavioral audit writer. Given the full simulation results, write a \
-3-5 paragraph behavioral audit that explains the findings in plain language.
+publication-ready behavioral audit organised into the 8 sections below.
 
-RULES:
-1. Lead with the non-obvious insight, not the headline number.
+WAVE 8 — required output structure (use these exact section headings):
+
+# 1. Executive summary
+One paragraph. The non-obvious insight first, then the headline adoption number with \
+its confidence band.
+
+# 2. Research overview
+What the research stages found. Mention the VoC bias note if present (Reddit/HN-skewed \
+corpora must be flagged when pros/cons lean on VoC).
+
+# 3. Parameter reasoning — "Evidence & Reasoning"
+Wave 8.5: a one-sentence-per-headline-number subsection. For each headline parameter \
+emit `param=value` followed by its `[cite: <evidence_ids>]` from the Parameter Reasoning \
+Trail in the context. When `source_type=default` (no research evidence), say so \
+explicitly — DO NOT fabricate citations. When `published_bounds` are present, mention \
+whether the calibrated value sits inside the band.
+Reference assumption IDs (A1, A2…) when their confidence is low or sensitivity is high.
+
+# 4. Adoption simulation
+Adoption curve over rounds. Time-to-50% if reached. Chasm round if growth stalled past \
+the innovator phase. Per-archetype story — what drove adoption for each Rogers segment, \
+what blocked it. Use the "Per-Segment Narratives" block in the context.
+
+# 5. Pros & cons
+Wave 8.5 — render two named subsections inside this section:
+**Triangulated Claims** — pros / cons whose `evidence_strength.cls == "triangulated"` \
+(both simulation AND VoC support). These are load-bearing.
+**One-sided signal — treat as directional, not load-bearing** — items whose \
+`evidence_strength.cls == "nuance"` (one side only).
+Items with `cls == "weak"` MUST NOT appear in the report — they reach you only when \
+the validator missed them; flag in limitations and skip.
+Cite VoC evidence using the resolved evidence IDs from the Parameter Reasoning Trail.
+
+# 6. KPI dashboard
+Convertible pool count, top driver, top blocker, cascade timing if a cluster crossed \
+critical mass, and the top-3 sensitivity parameters. Make convertible-pool concrete: \
+"X agents sit at P(adopt) ∈ [0.4, 0.6] — small interventions can flip them."
+
+# 7. Recommended interventions
+Use the cost-per-adoption-pp ranking. Lead with the top intervention. Mention the \
+pairwise combo and its additivity classification if a combo row was emitted.
+
+# 8. Limitations & caveats
+Surface any: VoC bias notes, low-confidence assumptions, default-sourced parameters, \
+events the simulation can't model directly.
+
+GENERAL RULES:
+1. Lead each section with the non-obvious insight, not the headline number.
 2. Name specific mechanisms (e.g., "loss aversion at λ=2.25", not "psychological bias").
-3. Give specific numbers from the simulation (adoption rates, force values, swing sizes).
+3. Give specific numbers from the simulation (adoption rates, force values, swing sizes, costs).
 4. Flag any discovered competitors the user didn't mention.
-5. End with the #1 actionable recommendation and its predicted impact.
-6. Reference assumption IDs (A1, A2) when discussing uncertainty.
-7. Keep it under 400 words.
-8. Use markdown formatting: **bold** for key numbers, `code` for parameter names.
+5. Reference assumption IDs (A1, A2) when discussing uncertainty.
+6. Keep total under 800 words.
+7. Use markdown formatting: **bold** for key numbers, `code` for parameter names.
 
 The audience is a product manager or founder who understands business but not behavioral economics. \
 Explain the mechanisms in terms of customer behavior, not academic terminology.

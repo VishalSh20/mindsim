@@ -31,6 +31,7 @@ from mindsim.engine.forces import compute_decisions, compute_forces, compute_wei
 from mindsim.engine.population import AGENT_DTYPE, apply_awareness, generate_population
 from mindsim.engine.state_machine import (
     advance_adopted,
+    advance_trialing,
     decay_awareness,
     decide_considering_to_adopted,
     phase_counts,
@@ -128,18 +129,60 @@ def simulate(
     sync_aware_flag(agents)
 
     # 4c. MULTI-ROUND LOOP
+    rounds_log, final_forces, final_adopt_prob = run_rounds(
+        agents, params, n_rounds=n_rounds, rng=rng, starting_round=1
+    )
+
+    # 4d. POST-SIMULATION SUMMARY
+    result = summarize_state(
+        agents=agents,
+        n_agents=n_agents,
+        archetype_names=archetype_names,
+        final_forces=final_forces,
+        final_adopt_prob=final_adopt_prob,
+        rounds_log=rounds_log,
+    )
+
+    logger.info(
+        "Simulation complete (%d rounds): %.1f%% total, %.1f%% of aware",
+        n_rounds,
+        result.total_adoption * 100,
+        result.aware_adoption * 100,
+    )
+    return result
+
+
+def run_rounds(
+    agents: np.ndarray,
+    params,
+    n_rounds: int,
+    rng: np.random.Generator,
+    starting_round: int = 1,
+) -> tuple[list[RoundSnapshot], dict[str, np.ndarray], np.ndarray]:
+    """Execute `n_rounds` of the per-round phase / force / decision loop.
+
+    Mutates `agents` in place. Returns the per-round snapshot log and the
+    final-round force / probability arrays so callers can build (or update)
+    a SimulationResult.
+
+    Used by `simulate()` for fresh runs and by Wave 6's
+    `pipeline/events.py` to apply additional rounds onto a persisted
+    population without regenerating it.
+    """
+    n_agents = len(agents)
     rounds_log: list[RoundSnapshot] = []
     final_forces: dict[str, np.ndarray] | None = None
     final_adopt_prob: np.ndarray | None = None
 
-    for round_idx in range(1, n_rounds + 1):
-        # ── cluster-local adoption rates (Wave 4) ──
-        # Computed ONCE at the top of each round from the state carried
-        # over from the previous round. Used both by the WOM awareness
-        # promotion and the cluster-local social-proof force.
+    for offset in range(n_rounds):
+        round_idx = starting_round + offset
+
+        # Cluster-local adoption rates (Wave 4) — computed once at the top
+        # of each round from the state carried over from the previous
+        # round. Used by both the WOM awareness promotion and the
+        # cluster-local social-proof force.
         cluster_rates = compute_cluster_adoption_rates(agents)
 
-        # ── awareness update ──
         decay_awareness(agents)
         promote_unaware_to_aware(
             agents,
@@ -148,35 +191,41 @@ def simulate(
             cluster_rates=cluster_rates,
         )
         promote_aware_to_considering(agents, params, rng=rng)
-
         sync_aware_flag(agents)
 
-        # ── force computation + decision draw ──
         forces = compute_forces(agents, params, cluster_rates=cluster_rates)
         adopt_prob, _ = compute_decisions(forces, temperature=3.0, rng=rng)
 
-        decide_considering_to_adopted(agents, adopt_prob, rng=rng)
+        decide_considering_to_adopted(
+            agents,
+            adopt_prob,
+            rng=rng,
+            free_trial_active=bool(getattr(params, "free_trial_active", False)),
+            free_trial_duration_rounds=int(
+                getattr(params, "free_trial_duration_rounds", 3)
+            ),
+            free_trial_entry_threshold=float(
+                getattr(params, "free_trial_entry_threshold", 0.20)
+            ),
+        )
+        advance_trialing(agents, rng=rng)
         n_locked, n_churned = advance_adopted(agents, rng=rng)
         sync_aware_flag(agents)
 
-        # ── snapshot ──
-        sync_aware_flag(agents)
         total_adopt = total_adoption_count(agents)
-        # Post-round cluster rates for the snapshot (reflect this round's
-        # transitions; the `cluster_rates` computed at the top of the
-        # round were pre-transition).
         post_cluster_rates = compute_cluster_adoption_rates(agents)
-        snapshot = RoundSnapshot(
-            round=round_idx,
-            phase_counts=phase_counts(agents),
-            cluster_adoption={
-                i: float(post_cluster_rates[i])
-                for i in range(len(post_cluster_rates))
-            },
-            total_adoption=total_adopt / max(n_agents, 1),
-            aware_count=int(agents["aware"].sum()),
+        rounds_log.append(
+            RoundSnapshot(
+                round=round_idx,
+                phase_counts=phase_counts(agents),
+                cluster_adoption={
+                    i: float(post_cluster_rates[i])
+                    for i in range(len(post_cluster_rates))
+                },
+                total_adoption=total_adopt / max(n_agents, 1),
+                aware_count=int(agents["aware"].sum()),
+            )
         )
-        rounds_log.append(snapshot)
         logger.debug(
             "round %d: adopted=%d locked_in=%d churned=%d (+%d locked, +%d churned)",
             round_idx,
@@ -190,9 +239,55 @@ def simulate(
         final_forces = forces
         final_adopt_prob = adopt_prob
 
-    # 4d. POST-SIMULATION SUMMARY
     assert final_forces is not None and final_adopt_prob is not None
+    return rounds_log, final_forces, final_adopt_prob
 
+
+def snapshot_state(
+    agents: np.ndarray,
+    params,
+    rng: np.random.Generator,
+    archetype_names: list[str] | None = None,
+) -> SimulationResult:
+    """Snapshot a loaded agent array into a SimulationResult without
+    advancing any rounds.
+
+    Computes a single force pass + decision-probability draw so the
+    resulting `SimulationResult` carries the same `_agent_forces` /
+    `_agent_probs` invariants as a freshly-simulated one. Used by
+    Wave 6's session loader so events can be applied without first
+    re-running the multi-round simulation.
+    """
+    if archetype_names is None:
+        archetype_names = list(load_archetypes().names)
+    sync_aware_flag(agents)
+    cluster_rates = compute_cluster_adoption_rates(agents)
+    forces = compute_forces(agents, params, cluster_rates=cluster_rates)
+    adopt_prob, _ = compute_decisions(forces, temperature=3.0, rng=rng)
+    return summarize_state(
+        agents=agents,
+        n_agents=len(agents),
+        archetype_names=archetype_names,
+        final_forces=forces,
+        final_adopt_prob=adopt_prob,
+        rounds_log=[],
+    )
+
+
+def summarize_state(
+    agents: np.ndarray,
+    n_agents: int,
+    archetype_names: list[str],
+    final_forces: dict[str, np.ndarray],
+    final_adopt_prob: np.ndarray,
+    rounds_log: list[RoundSnapshot],
+) -> SimulationResult:
+    """Build a SimulationResult from a finished agent array + final-round arrays.
+
+    Pure post-processing — no transitions, no RNG. Safe to call repeatedly
+    on the same agents array (e.g. after each event applied on a
+    persisted population).
+    """
     phase_arr = agents["phase"]
     decisions = np.isin(phase_arr, np.array(ADOPTED_PHASES, dtype=phase_arr.dtype))
     n_decided = int(decisions.sum())
@@ -251,13 +346,6 @@ def simulate(
     result._agent_probs = final_adopt_prob
     result._agent_decisions = decisions
     result._agents = agents
-
-    logger.info(
-        "Simulation complete (%d rounds): %.1f%% total, %.1f%% of aware",
-        n_rounds,
-        total_adoption * 100,
-        aware_adoption * 100,
-    )
     return result
 
 

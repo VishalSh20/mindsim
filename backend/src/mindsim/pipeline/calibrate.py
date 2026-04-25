@@ -190,11 +190,17 @@ def _parse_cparam(d: dict | float | None, default: float = 0.5) -> CalibratedPar
         return CalibratedParam(value=default)
     if isinstance(d, (int, float)):
         return CalibratedParam(value=float(d))
+    refs = d.get("evidence_refs")
+    refs_list = [str(r) for r in refs] if isinstance(refs, list) else []
+    src = d.get("source_type")
+    src_str = str(src) if src in {"voc", "research", "trends", "default", "llm_judgment"} else None
     return CalibratedParam(
         value=float(d.get("value", default)),
         basis=d.get("basis", ""),
         confidence=float(d.get("confidence", 0.5)),
         by_archetype=_parse_by_archetype(d),
+        evidence_refs=refs_list,
+        source_type=src_str,
     )
 
 
@@ -398,6 +404,14 @@ def _parse_calibration_response(
     # Assumptions
     assumptions = []
     for i, a in enumerate(data.get("assumptions", []), 1):
+        a_refs = a.get("evidence_refs")
+        a_refs_list = [str(r) for r in a_refs] if isinstance(a_refs, list) else []
+        a_src = a.get("source_type")
+        a_src_str = (
+            str(a_src)
+            if a_src in {"voc", "research", "trends", "default", "llm_judgment"}
+            else None
+        )
         assumptions.append(
             Assumption(
                 id=f"A{i}",
@@ -406,6 +420,8 @@ def _parse_calibration_response(
                 basis=a.get("basis", ""),
                 confidence=float(a.get("confidence", 0.5)),
                 sensitivity=a.get("sensitivity", "medium"),
+                evidence_refs=a_refs_list,
+                source_type=a_src_str,
             )
         )
 

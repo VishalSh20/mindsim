@@ -55,6 +55,14 @@ INVESTMENT_GROWTH_PER_ROUND = 0.10      # depth grows while ADOPTED
 LOCK_IN_THRESHOLD = 0.70                # investment_depth above this → LOCKED_IN
 BASE_CHURN_RATE = 0.02                  # baseline P(churn) per round while ADOPTED
 
+# Wave 7 — free-trial constants. The trial phase exists in the dtype since
+# Wave 3 but had no transitions wired; these constants drive the new
+# considering→trialing→adopted/quit edges.
+TRIAL_CONSISTENCY_BONUS = 0.15         # Cialdini commitment/consistency lift
+TRIAL_SUNK_COST_PER_ROUND = 0.10       # added to conversion utility per trial round invested
+TRIAL_INVESTMENT_DEPTH_SEED = 0.30     # converted trial users start with a head start (vs 0.10 for direct)
+TRIAL_QUIT_AWARENESS_STRENGTH = 0.30   # quit users remember it, but at reduced strength
+
 
 # ──────────────────────── Phase sync helper ────────────────────────
 
@@ -216,7 +224,10 @@ def decide_considering_to_adopted(
     adopt_prob: np.ndarray,
     rng: np.random.Generator,
     revert_strength_penalty: float = 0.20,
-) -> tuple[int, int]:
+    free_trial_active: bool = False,
+    free_trial_duration_rounds: int = 3,
+    free_trial_entry_threshold: float = 0.20,
+) -> tuple[int, int, int]:
     """For agents currently CONSIDERING, draw adoption via their P(adopt).
 
     Agents who adopt → ADOPTED. Agents who *don't* adopt revert to
@@ -226,13 +237,20 @@ def decide_considering_to_adopted(
     agent needs to re-cross the consideration threshold (via re-exposure)
     before they get another chance.
 
-    Returns (n_adopted, n_reverted).
+    Wave 7 — when `free_trial_active` is True, considering agents who
+    DON'T directly adopt but whose `adopt_prob` clears
+    `free_trial_entry_threshold` AND have not previously quit a trial
+    (`trial_outcome != 0`) are routed to TRIALING instead of reverting.
+    `advance_trialing()` then handles the conversion / quit decision
+    `free_trial_duration_rounds` rounds later.
+
+    Returns (n_adopted, n_reverted, n_trialing).
     """
     phase = agents["phase"]
     considering = phase == int(Phase.CONSIDERING)
     n_considering = int(considering.sum())
     if n_considering == 0:
-        return 0, 0
+        return 0, 0, 0
 
     draws = rng.random(n_considering)
     considering_probs = adopt_prob[considering]
@@ -240,19 +258,118 @@ def decide_considering_to_adopted(
     global_idx = np.flatnonzero(considering)
 
     adopting_global = global_idx[adopting_local]
-    reverting_global = global_idx[~adopting_local]
+    rest_global = global_idx[~adopting_local]
 
     # Adopters → ADOPTED with a small investment-depth seed.
     agents["phase"][adopting_global] = int(Phase.ADOPTED)
     agents["investment_depth"][adopting_global] = 0.10
 
-    # Non-adopters → back to AWARE with reduced awareness_strength.
+    n_trialing = 0
+    reverting_global = rest_global
+
+    if free_trial_active and len(rest_global) > 0:
+        rest_probs = adopt_prob[rest_global]
+        prior_quit = agents["trial_outcome"][rest_global] == 0
+        eligible = (rest_probs >= free_trial_entry_threshold) & (~prior_quit)
+        trialing_global = rest_global[eligible]
+        reverting_global = rest_global[~eligible]
+        if len(trialing_global) > 0:
+            agents["phase"][trialing_global] = int(Phase.TRIALING)
+            agents["trial_rounds_remaining"][trialing_global] = int(
+                free_trial_duration_rounds
+            )
+            agents["trial_outcome"][trialing_global] = -1
+            agents["awareness_strength"][trialing_global] = np.maximum(
+                agents["awareness_strength"][trialing_global], 0.5
+            )
+            n_trialing = int(len(trialing_global))
+
+    # Non-adopters who weren't routed to TRIALING → back to AWARE.
     agents["phase"][reverting_global] = int(Phase.AWARE)
     agents["awareness_strength"][reverting_global] = np.maximum(
         agents["awareness_strength"][reverting_global] - revert_strength_penalty,
         0.0,
     )
-    return int(adopting_local.sum()), int((~adopting_local).sum())
+    return int(adopting_local.sum()), int(len(reverting_global)), n_trialing
+
+
+def advance_trialing(
+    agents: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[int, int]:
+    """Tick TRIALING agents one round forward.
+
+    Each round a trial is active, `trial_rounds_remaining` decrements.
+    When it reaches 0, the agent decides:
+
+        conversion_score = experienced_value
+                         + sunk_cost_bonus(rounds_invested)
+                         + TRIAL_CONSISTENCY_BONUS
+        switching_drag   = agent_switching_cost
+        P(convert) = sigmoid(conversion_score - switching_drag)
+
+    Converters → ADOPTED with a higher `investment_depth` seed than direct
+    adopters (they've already invested time). Quitters → AWARE with
+    `trial_outcome=0`, blocking re-entry to TRIALING in future rounds.
+    `experienced_value` is `agent_perceived_benefit` directly — the trial
+    has resolved the certainty the prospect-value pre-trial was discounting.
+
+    Returns (n_converted, n_quit). When called with no TRIALING agents,
+    returns (0, 0) — caller can ignore.
+    """
+    phase = agents["phase"]
+    trialing = phase == int(Phase.TRIALING)
+    if not trialing.any():
+        return 0, 0
+
+    # Decrement rounds-remaining for active trials. Floor at 0 so a finished
+    # trial that for any reason wasn't promoted last round doesn't go
+    # negative (defensive — current logic always promotes on reach-zero).
+    agents["trial_rounds_remaining"][trialing] = np.maximum(
+        agents["trial_rounds_remaining"][trialing].astype(np.int16) - 1, 0
+    ).astype(np.int8)
+
+    ended = trialing & (agents["trial_rounds_remaining"] <= 0)
+    if not ended.any():
+        return 0, 0
+
+    ended_idx = np.flatnonzero(ended)
+    pb = agents["agent_perceived_benefit"][ended_idx].astype(np.float64)
+    sc = agents["agent_switching_cost"][ended_idx].astype(np.float64)
+
+    # Sunk-cost bonus scales with how many rounds the agent invested in
+    # the trial. We don't currently store rounds_completed, so use the full
+    # trial duration as the upper bound (trial_rounds_remaining hit 0 → all
+    # rounds were used). For partial trials (future feature) this would
+    # need a separate counter.
+    sunk_cost_bonus = TRIAL_SUNK_COST_PER_ROUND * 3.0  # 3 = typical duration
+
+    conversion_score = pb + sunk_cost_bonus + TRIAL_CONSISTENCY_BONUS
+    drag = sc
+    # Logistic squash. Temperature 2.0 keeps the curve gentle — trial
+    # outcomes shouldn't be deterministic on any single feature.
+    p_convert = 1.0 / (1.0 + np.exp(-2.0 * (conversion_score - drag)))
+    p_convert = np.clip(p_convert, 0.0, 1.0)
+
+    draws = rng.random(len(ended_idx))
+    converting_local = draws < p_convert
+
+    converting_global = ended_idx[converting_local]
+    quitting_global = ended_idx[~converting_local]
+
+    if len(converting_global) > 0:
+        agents["phase"][converting_global] = int(Phase.ADOPTED)
+        agents["investment_depth"][converting_global] = TRIAL_INVESTMENT_DEPTH_SEED
+        agents["trial_outcome"][converting_global] = 1
+        agents["trial_rounds_remaining"][converting_global] = 0
+
+    if len(quitting_global) > 0:
+        agents["phase"][quitting_global] = int(Phase.AWARE)
+        agents["trial_outcome"][quitting_global] = 0
+        agents["awareness_strength"][quitting_global] = TRIAL_QUIT_AWARENESS_STRENGTH
+        agents["trial_rounds_remaining"][quitting_global] = 0
+
+    return int(converting_local.sum()), int((~converting_local).sum())
 
 
 def advance_adopted(

@@ -171,8 +171,9 @@ class TestDecideConsideringToAdopted:
         a = _blank_agents(100, Phase.CONSIDERING)
         probs = np.ones(100) * 0.99
         rng = np.random.default_rng(0)
-        n_adopt, n_revert = decide_considering_to_adopted(a, probs, rng)
+        n_adopt, n_revert, n_trial = decide_considering_to_adopted(a, probs, rng)
         assert n_adopt > 90
+        assert n_trial == 0  # default free_trial_active=False
         # Count matches the phase distribution (adopted agents scattered).
         assert int((a["phase"] == int(Phase.ADOPTED)).sum()) == n_adopt
 
@@ -181,9 +182,10 @@ class TestDecideConsideringToAdopted:
         a["awareness_strength"] = 0.5
         probs = np.zeros(50)
         rng = np.random.default_rng(0)
-        n_adopt, n_revert = decide_considering_to_adopted(a, probs, rng)
+        n_adopt, n_revert, n_trial = decide_considering_to_adopted(a, probs, rng)
         assert n_adopt == 0
         assert n_revert == 50
+        assert n_trial == 0
         assert (a["phase"] == int(Phase.AWARE)).all()
 
     def test_revert_penalises_awareness_strength(self):

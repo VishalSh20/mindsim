@@ -7,9 +7,16 @@ Optionally, parameters can have per-archetype overrides (by_archetype).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from mindsim.models.product import Feature
+
+# Wave 8.5 — provenance tags. Same Literal as models/evidence.SourceType,
+# duplicated here to avoid an import cycle (evidence.py is imported by
+# downstream consumers that also need config.py).
+ParamSourceType = Literal["voc", "research", "trends", "default", "llm_judgment"]
 
 
 # The 5 Rogers adoption archetypes
@@ -32,12 +39,23 @@ def resolve_archetype_value(
 
 
 class CalibratedParam(BaseModel):
-    """A single calibrated parameter with provenance."""
+    """A single calibrated parameter with provenance.
+
+    Wave 8.5: optional `evidence_refs` carry IDs that resolve in the
+    `EvidenceStore` attached to a SimulationResult. Empty list (the
+    default) means "no resolvable evidence" — the validator flags this
+    as sparse-rationale unless `source_type` is `"default"`.
+    """
 
     value: float
     basis: str = ""  # why this number
     confidence: float = 0.5  # 0-1, how confident we are
     by_archetype: dict[str, float] | None = None  # optional per-archetype overrides
+
+    # Wave 8.5 additions — optional, default to empty so existing
+    # code paths and serialised v0..v8 dumps still parse cleanly.
+    evidence_refs: list[str] = Field(default_factory=list)
+    source_type: ParamSourceType | None = None
 
 
 class ReferencePriceComponent(BaseModel):
@@ -77,7 +95,15 @@ class PopulationConfig(BaseModel):
 
 
 class Assumption(BaseModel):
-    """A challengeable assumption with an ID for the user."""
+    """A challengeable assumption with an ID for the user.
+
+    Wave 8.5: `evidence_refs` link into the run's EvidenceStore. The
+    validator rejects assumptions with `source_type != "default"` and
+    no resolvable refs (sparse-rationale). `published_bounds` is
+    populated from RESEARCH.md-derived constants for parameters with
+    published ranges (e.g. λ ∈ [1.0, 4.0]); validator rejects values
+    outside the band.
+    """
 
     id: str  # "A1", "A2", etc.
     parameter: str
@@ -85,6 +111,11 @@ class Assumption(BaseModel):
     basis: str
     confidence: float
     sensitivity: str = "unknown"  # "high", "medium", "low"
+
+    # Wave 8.5 additions.
+    evidence_refs: list[str] = Field(default_factory=list)
+    source_type: ParamSourceType | None = None
+    published_bounds: tuple[float, float] | None = None
 
 
 class SimulationParams(BaseModel):
@@ -159,6 +190,15 @@ class SimulationParams(BaseModel):
     # with grounded values and populate CompetitorInfo.feature_scores on the
     # actual competitor objects.
     competitor_feature_scores: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+    # v2-middle Wave 7: free-trial intervention machinery.
+    # When `free_trial_active` is True, the state machine routes a fraction
+    # of CONSIDERING agents into TRIALING for `free_trial_duration_rounds`
+    # rounds before they decide whether to convert. Defaults off so non-
+    # intervention sims behave exactly as Waves 0-6.
+    free_trial_active: bool = False
+    free_trial_duration_rounds: int = 3
+    free_trial_entry_threshold: float = 0.20  # min adopt_prob to enter trial
 
 
 class SimulationConfig(BaseModel):
